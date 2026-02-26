@@ -244,7 +244,7 @@ class DB:
         """ROOT 绑定 Admin。返回 'ok'/'max'/'already'/'is_root'"""
         with self._conn() as conn:
             count = conn.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
-            if count >= 2:
+            if count >= 20:
                 return 'max'
             existing = conn.execute("SELECT role FROM users WHERE telegram_id=?", (tid,)).fetchone()
             if existing and existing['role'] == 'root':
@@ -325,12 +325,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = db.get_user_role(user.id)
     if not role:
         count = db.get_admin_count()
-        if count >= 2:
+        if count >= 20:
             await update.message.reply_text(
                 '☁️ <b>云际会议</b>\n'
                 '━━━━━━━━━━━━━━━\n\n'
                 f'👋 你好，{user.first_name}！\n\n'
-                '⛔ <b>绑定名额已满（2/2）</b>\n\n'
+                '⛔ <b>绑定名额已满（20/20）</b>\n\n'
                 '请联系管理员处理。',
                 parse_mode='HTML',
             )
