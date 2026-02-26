@@ -244,7 +244,7 @@ class DB:
         """ROOT 绑定 Admin。返回 'ok'/'max'/'already'/'is_root'"""
         with self._conn() as conn:
             count = conn.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
-            if count >= 20:
+            if count >= 2:
                 return 'max'
             existing = conn.execute("SELECT role FROM users WHERE telegram_id=?", (tid,)).fetchone()
             if existing and existing['role'] == 'root':
@@ -325,12 +325,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = db.get_user_role(user.id)
     if not role:
         count = db.get_admin_count()
-        if count >= 20:
+        if count >= 2:
             await update.message.reply_text(
                 '☁️ <b>云际会议</b>\n'
                 '━━━━━━━━━━━━━━━\n\n'
                 f'👋 你好，{user.first_name}！\n\n'
-                '⛔ <b>绑定名额已满（20/20）</b>\n\n'
+                '⛔ <b>绑定名额已满（2/2）</b>\n\n'
                 '请联系管理员处理。',
                 parse_mode='HTML',
             )
@@ -439,43 +439,9 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    role = db.get_user_role(user.id)
+    rows = db.get_user_codes(user.id)
     stats = db.stock_stats()
 
-    # ROOT/admin 显示所有已发出的码（包括 getcodes 取出的）
-    if role in ('root', 'admin'):
-        with db._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM auth_code_pool WHERE status='assigned' ORDER BY pool_id DESC"
-            ).fetchall()
-        if not rows:
-            await update.message.reply_text(
-                f'📋 <b>授权码总览</b>\n\n'
-                f'暂无已发出的码。\n'
-                f'📦 可用库存：<b>{stats["available"]}</b>',
-                parse_mode='HTML',
-                reply_markup=main_kb(role),
-            )
-            return
-        msg = f'📋 <b>授权码总览</b>\n━━━━━━━━━━━━━━━\n\n'
-        msg += f'📦 可用库存：<b>{stats["available"]}</b> | 已发出：<b>{stats["assigned"]}</b>\n\n'
-        for i, row in enumerate(rows, 1):
-            code_val = row['code']
-            assigned_at = (row['assigned_at'] or '')[:16].replace('T', ' ')
-            if row['assigned_to'] and row['assigned_to'] != 0:
-                owner = f'用户 {row["assigned_to"]}'
-            else:
-                owner = '管理员发放'
-            note = f'  <i>{row["note"]}</i>' if row['note'] else ''
-            msg += f'{i}. <code>{code_val}</code>  {owner}{note}\n   📅 {assigned_at}\n\n'
-            if i >= 30:
-                msg += f'...共 {len(rows)} 条\n'
-                break
-        await update.message.reply_text(msg, parse_mode='HTML', reply_markup=main_kb(role))
-        return
-
-    # 普通 admin 只看自己的
-    rows = db.get_user_codes(user.id)
     if not rows:
         await update.message.reply_text(
             f'📋 <b>我的授权码</b>\n\n'
@@ -489,10 +455,12 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = '📋 <b>我的授权码</b>\n━━━━━━━━━━━━━━━\n\n'
     msg += f'📦 库存剩余可用：<b>{stats["available"]}</b>\n\n'
+
     for i, row in enumerate(rows, 1):
         code_val = row['code']
         assigned_at = (row['assigned_at'] or '')[:16].replace('T', ' ')
         msg += f'{i}. <code>{code_val}</code>\n   🟢 可用\n   📅 领取时间：{assigned_at}\n\n'
+
     await update.message.reply_text(msg, parse_mode='HTML', reply_markup=main_kb('admin'))
 
 
@@ -775,33 +743,6 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             note = f' <i>{r["note"]}</i>' if r['note'] else ''
             msg += f'<code>{r["code"]}</code> {st}{note}\n'
         await update.message.reply_text(msg, parse_mode='HTML')
-        return
-
-    # /admin getcodes <数量>
-    if sub == 'getcodes':
-        n = int(args[1]) if len(args) > 1 and args[1].isdigit() else 10
-        n = min(n, 45)
-        with db._conn() as conn:
-            rows = conn.execute(
-                "SELECT pool_id, code FROM auth_code_pool WHERE status='available' ORDER BY pool_id LIMIT ?", (n,)
-            ).fetchall()
-            if not rows:
-                await update.message.reply_text('❌ 库存为空')
-                return
-            ids = [r[0] for r in rows]
-            conn.execute(
-                f"UPDATE auth_code_pool SET status='assigned', assigned_to=0, assigned_at=? WHERE pool_id IN ({','.join('?'*len(ids))})",
-                [datetime.now().isoformat()] + ids
-            )
-            conn.commit()
-        stats = db.stock_stats()
-        code_list = '\n'.join(f'<code>{r[1]}</code>' for r in rows)
-        await update.message.reply_text(
-            f'📦 <b>已取出 {len(rows)} 个授权码</b>\n'
-            f'剩余库存：<b>{stats["available"]}</b>\n\n'
-            f'{code_list}',
-            parse_mode='HTML',
-        )
         return
 
     # /admin delcode <码>
