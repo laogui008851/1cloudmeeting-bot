@@ -541,13 +541,11 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     issued = stats['assigned']   # 已出库
     available = stats['available']  # 未出库
 
+    total = available + issued
     msg = (
         f'📋 <b>授权码总览</b>\n'
-        f'━━━━━━━━━━━━━━━\n'
-        f'📦 未出库：<b>{available}</b> 个\n'
-        f'📤 已出库：<b>{issued}</b> 个\n'
-        f'🔴 使用中：<b>{in_use_count}</b> 个\n'
-        f'⚠️ 已到期：<b>{expired_count}</b> 个\n'
+        f'总数（<b>{total}</b>）\n'
+        f'未出库（<b>{available}</b>）/ 出库（<b>{issued}</b>）/ 使用中（<b>{in_use_count}</b>）/ 到期（<b>{expired_count}</b>）'
     )
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton('🔴 使用中', callback_data='query_inuse'),
@@ -875,13 +873,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     in_use_count += 1
             else:
                 in_use_count += 1
+        total = stats['available'] + stats['assigned']
         msg = (
             f'📋 <b>授权码总览</b>\n'
-            f'━━━━━━━━━━━━━━━\n'
-            f'📦 未出库：<b>{stats["available"]}</b> 个\n'
-            f'📤 已出库：<b>{stats["assigned"]}</b> 个\n'
-            f'🔴 使用中：<b>{in_use_count}</b> 个\n'
-            f'⚠️ 已到期：<b>{expired_count}</b> 个\n'
+            f'总数（<b>{total}</b>）\n'
+            f'未出库（<b>{stats["available"]}</b>）/ 出库（<b>{stats["assigned"]}</b>）/ 使用中（<b>{in_use_count}</b>）/ 到期（<b>{expired_count}</b>）'
         )
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton('🔴 使用中', callback_data='query_inuse'),
