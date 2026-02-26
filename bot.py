@@ -602,10 +602,7 @@ async def _cb_query_inuse(query, uid: int):
             h = int(remaining.total_seconds() // 3600)
             m = int((remaining.total_seconds() % 3600) // 60)
             time_str = f'⏱ 剩余 {h}时{m}分'
-        if role == 'root':
-            msg += f'{i}. → {_get_who(row)}\n'
-        else:
-            msg += f'{i}.\n'
+        msg += f'{i}. <code>{code_val}</code>\n'
         msg += f'   {status_str}\n'
         if time_str:
             msg += f'   {time_str}\n'
