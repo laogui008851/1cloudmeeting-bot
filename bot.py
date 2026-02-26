@@ -652,30 +652,20 @@ async def _cb_query_idle(query, uid: int):
 
     msg = f'🟢 <b>未使用</b>\n━━━━━━━━━━━━━━━\n\n'
 
-    # 已出库部分
+    # 已出库部分 —— 只显示码值（root 附持码人）
     if idle_rows:
-        msg += f'<b>【已出库 {len(idle_rows)} 个】</b>\n'
+        msg += f'<b>已出库 {len(idle_rows)} 个：</b>\n'
         for i, (row, detail) in enumerate(idle_rows, 1):
             code_val = row['code']
-            expires_minutes = detail.get('expires_minutes') or 0
-            time_str = ''
-            if expires_minutes and int(expires_minutes) > 0:
-                total_h = int(int(expires_minutes) // 60)
-                total_m = int(int(expires_minutes) % 60)
-                time_str = f'{total_h}时{total_m}分' if total_m > 0 else f'{total_h}小时'
             if role == 'root':
-                msg += f'{i}. <code>{code_val}</code> → {_get_who(row)}'
+                msg += f'{i}. <code>{code_val}</code> → {_get_who(row)}\n'
             else:
-                msg += f'{i}. <code>{code_val}</code>'
-            if time_str:
-                msg += f'  ⏳{time_str}'
-            msg += '\n'
+                msg += f'{i}. <code>{code_val}</code>\n'
     else:
-        msg += '<b>【已出库 0 个】</b>\n暂无已出库未使用的码\n'
+        msg += '<b>已出库 0 个</b>\n'
 
-    # 未出库部分（只显示数量）
-    msg += f'\n<b>【未出库 {stats["available"]} 个】</b>\n'
-    msg += f'库存中共 <b>{stats["available"]}</b> 个可分配授权码\n'
+    # 未出库 —— 只显示数量
+    msg += f'\n📦 未出库库存：<b>{stats["available"]}</b> 个\n'
 
     await query.edit_message_text(msg, parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup([[
