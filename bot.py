@@ -505,7 +505,7 @@ async def claim_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """查询用户已领取的码（纯本地DB）"""
+    """查询授权码 —— 弹出两个分类按钮"""
     user = update.effective_user
     db.track_user(user.id, user.username, user.first_name)
 
@@ -517,151 +517,171 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    stats = db.stock_stats()
-    role = db.get_user_role(user.id)
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton('🔴 使用中', callback_data='query_inuse'),
+        InlineKeyboardButton('🟢 未使用', callback_data='query_idle'),
+    ]])
+    await update.message.reply_text(
+        '📋 <b>查询授权码</b>\n请选择查看类型：',
+        parse_mode='HTML',
+        reply_markup=kb,
+    )
 
-    # ROOT 看全部已发出的码
-    if role == 'root':
-        with db._conn() as conn:
-            all_rows = conn.execute(
+
+def _get_who(row) -> str:
+    """从数据库行取持码人名称"""
+    if not row['assigned_to'] or row['assigned_to'] == 0:
+        return '管理员发放'
+    uname = row['username'] or ''
+    fname = row['first_name'] or str(row['assigned_to'])
+    return f'{fname}{("@"+uname) if uname else ""}'
+
+
+async def _cb_query_inuse(query, uid: int):
+    """回调：使用中的码 —— 只显示到期倒计时，不显示码本身"""
+    role = db.get_user_role(uid)
+    with db._conn() as conn:
+        if role == 'root':
+            rows = conn.execute(
                 "SELECT acp.*, u.first_name, u.username FROM auth_code_pool acp "
                 "LEFT JOIN users u ON acp.assigned_to = u.telegram_id "
                 "WHERE acp.status='assigned' ORDER BY acp.assigned_at DESC"
             ).fetchall()
-        if not all_rows:
-            await update.message.reply_text(
-                f'📋 <b>已发出授权码</b>\n\n暂无已发出的码。\n📦 库存可用：<b>{stats["available"]}</b>',
-                parse_mode='HTML', reply_markup=main_kb(role)
-            )
-            return
-        msg = f'📋 <b>已发出授权码（共{len(all_rows)}个）</b>\n📦 库存剩余：<b>{stats["available"]}</b>\n━━━━━━━━━━━━━━━\n\n'
-        buttons = []
-        all_status = await api_get_all_codes_status()
-        for i, row in enumerate(all_rows, 1):
-            at = (row['assigned_at'] or '')[:16].replace('T', ' ')
-            if row['assigned_to'] == 0 or not row['assigned_to']:
-                who = '管理员发放'
-            else:
-                uname = row['username'] or ''
-                fname = row['first_name'] or str(row['assigned_to'])
-                who = f'{fname}{ ("@"+uname) if uname else ""}'
+        else:
+            rows = conn.execute(
+                "SELECT acp.*, u.first_name, u.username FROM auth_code_pool acp "
+                "LEFT JOIN users u ON acp.assigned_to = u.telegram_id "
+                "WHERE acp.assigned_to=? AND acp.status='assigned'",
+                (uid,)
+            ).fetchall()
 
-            code_val = row['code']
-            detail = all_status.get(code_val, {})
-            in_use = int(detail.get('in_use') or 0) == 1
-            bound_room = detail.get('bound_room') or ''
-            expires_at = detail.get('expires_at') or ''
-            expires_minutes = detail.get('expires_minutes') or 0
+    all_status = await api_get_all_codes_status()
 
-            if in_use:
-                status = '🔴 使用中'
-                if bound_room:
-                    status += f'（{bound_room}）'
-                time_info = ''
-                if expires_at:
-                    try:
-                        exp = datetime.fromisoformat(str(expires_at).replace('Z', '+00:00'))
-                        remaining = exp - datetime.now(exp.tzinfo)
-                        if remaining.total_seconds() > 0:
-                            h = int(remaining.total_seconds() // 3600)
-                            m = int((remaining.total_seconds() % 3600) // 60)
-                            time_info = f'⏱ 剩余 {h}时{m}分'
-                        else:
-                            status = '⚠️ 已过期'
-                    except Exception:
-                        pass
-                msg += f'{i}. <code>{code_val}</code> → {who}\n'
-                msg += f'   {status}\n'
-                if time_info:
-                    msg += f'   {time_info}\n'
-                msg += f'   📅 {at}\n\n'
-                buttons.append([InlineKeyboardButton(f'🔴 结束会议 {code_val}', callback_data=f'release_{code_val}')])
-            else:
-                status = '🟢 可用'
-                time_info = ''
-                if expires_minutes and int(expires_minutes) > 0:
-                    total_h = int(int(expires_minutes) // 60)
-                    total_m = int(int(expires_minutes) % 60)
-                    time_info = f'总时长 {total_h}时{total_m}分（首次开房间后计时）' if total_m > 0 else f'总时长 {total_h}小时（首次开房间后计时）'
-                msg += f'{i}. <code>{code_val}</code> → {who}\n'
-                msg += f'   {status}\n'
-                if time_info:
-                    msg += f'   {time_info}\n'
-                msg += f'   📅 {at}\n\n'
+    active, expired_list = [], []
+    for row in rows:
+        detail = all_status.get(row['code'], {})
+        if int(detail.get('in_use') or 0) != 1:
+            continue
+        expires_at = detail.get('expires_at') or ''
+        remaining = None
+        is_expired = False
+        if expires_at:
+            try:
+                exp = datetime.fromisoformat(str(expires_at).replace('Z', '+00:00'))
+                rem = exp - datetime.now(exp.tzinfo)
+                if rem.total_seconds() > 0:
+                    remaining = rem
+                else:
+                    is_expired = True
+            except Exception:
+                pass
+        if is_expired:
+            expired_list.append((row, detail))
+        else:
+            active.append((row, detail, remaining))
 
-        await update.message.reply_text(msg, parse_mode='HTML',
-            reply_markup=InlineKeyboardMarkup(buttons) if buttons else main_kb(role))
-        return
-
-    rows = db.get_user_codes(user.id)
-
-    if not rows:
-        await update.message.reply_text(
-            f'📋 <b>我的授权码</b>\n\n'
-            f'您还未领取授权码。\n'
-            f'📦 当前库存：<b>{stats["available"]}</b> 个可用\n\n'
-            f'请点击「🎫 领取授权码」获取。',
-            parse_mode='HTML',
-            reply_markup=main_kb('admin'),
+    if not active and not expired_list:
+        await query.edit_message_text(
+            '🟢 当前没有使用中的授权码',
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton('« 返回', callback_data='query_back')
+            ]])
         )
         return
 
-    msg = '📋 <b>我的授权码</b>\n━━━━━━━━━━━━━━━\n\n'
-    msg += f'📦 库存剩余可用：<b>{stats["available"]}</b>\n\n'
+    msg = f'🔴 <b>使用中（{len(active)}个）</b>\n━━━━━━━━━━━━━━━\n\n'
+    buttons = []
+    for i, (row, detail, remaining) in enumerate(active, 1):
+        code_val = row['code']
+        bound_room = detail.get('bound_room') or ''
+        status_str = '🔴 使用中'
+        if bound_room:
+            status_str += f'（{bound_room}）'
+        time_str = ''
+        if remaining:
+            h = int(remaining.total_seconds() // 3600)
+            m = int((remaining.total_seconds() % 3600) // 60)
+            time_str = f'⏱ 剩余 {h}时{m}分'
+        if role == 'root':
+            msg += f'{i}. → {_get_who(row)}\n'
+        else:
+            msg += f'{i}.\n'
+        msg += f'   {status_str}\n'
+        if time_str:
+            msg += f'   {time_str}\n'
+        msg += '\n'
+        buttons.append([InlineKeyboardButton(f'🔴 结束会议 {code_val}', callback_data=f'release_{code_val}')])
+
+    if expired_list:
+        msg += f'⚠️ <b>已过期：{len(expired_list)} 个</b>（计时已结束，可结束会议释放）\n'
+
+    buttons.append([InlineKeyboardButton('« 返回', callback_data='query_back')])
+    await query.edit_message_text(msg, parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def _cb_query_idle(query, uid: int):
+    """回调：未使用 —— 已出库显示码值，未出库只显示数量"""
+    role = db.get_user_role(uid)
+    stats = db.stock_stats()
+
+    with db._conn() as conn:
+        if role == 'root':
+            rows = conn.execute(
+                "SELECT acp.*, u.first_name, u.username FROM auth_code_pool acp "
+                "LEFT JOIN users u ON acp.assigned_to = u.telegram_id "
+                "WHERE acp.status='assigned' ORDER BY acp.assigned_at DESC"
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT acp.*, u.first_name, u.username FROM auth_code_pool acp "
+                "LEFT JOIN users u ON acp.assigned_to = u.telegram_id "
+                "WHERE acp.assigned_to=? AND acp.status='assigned'",
+                (uid,)
+            ).fetchall()
 
     all_status = await api_get_all_codes_status()
-    buttons = []
-    for i, row in enumerate(rows, 1):
-        code_val = row['code']
-        assigned_at = (row['assigned_at'] or '')[:16].replace('T', ' ')
 
-        detail = all_status.get(code_val, {})
-        in_use = int(detail.get('in_use') or 0) == 1
-        bound_room = detail.get('bound_room') or ''
-        expires_at = detail.get('expires_at') or ''
-        expires_minutes = detail.get('expires_minutes') or 0
+    # 过滤出未使用（不在use）的已出库码
+    idle_rows = []
+    for row in rows:
+        detail = all_status.get(row['code'], {})
+        if int(detail.get('in_use') or 0) == 1:
+            continue
+        idle_rows.append((row, detail))
 
-        if in_use:
-            status = '🔴 使用中'
-            if bound_room:
-                status += f'（{bound_room}）'
-            time_info = ''
-            if expires_at:
-                try:
-                    exp = datetime.fromisoformat(str(expires_at).replace('Z', '+00:00'))
-                    remaining = exp - datetime.now(exp.tzinfo)
-                    if remaining.total_seconds() > 0:
-                        h = int(remaining.total_seconds() // 3600)
-                        m = int((remaining.total_seconds() % 3600) // 60)
-                        time_info = f'⏱ 剩余 {h}时{m}分'
-                    else:
-                        status = '⚠️ 已过期'
-                except Exception:
-                    pass
-            msg += f'{i}. <code>{code_val}</code>\n'
-            msg += f'   {status}\n'
-            if time_info:
-                msg += f'   {time_info}\n'
-            msg += f'   📅 领取时间：{assigned_at}\n\n'
-            buttons.append([InlineKeyboardButton(
-                f'🔴 结束会议 {code_val}',
-                callback_data=f'release_{code_val}'
-            )])
-        else:
-            status = '🟢 可用'
-            time_info = ''
+    msg = f'🟢 <b>未使用</b>\n━━━━━━━━━━━━━━━\n\n'
+
+    # 已出库部分
+    if idle_rows:
+        msg += f'<b>【已出库 {len(idle_rows)} 个】</b>\n'
+        for i, (row, detail) in enumerate(idle_rows, 1):
+            code_val = row['code']
+            expires_minutes = detail.get('expires_minutes') or 0
+            time_str = ''
             if expires_minutes and int(expires_minutes) > 0:
                 total_h = int(int(expires_minutes) // 60)
                 total_m = int(int(expires_minutes) % 60)
-                time_info = f'总时长 {total_h}时{total_m}分（首次开房间后计时）' if total_m > 0 else f'总时长 {total_h}小时（首次开房间后计时）'
-            msg += f'{i}. <code>{code_val}</code>\n'
-            msg += f'   {status}\n'
-            if time_info:
-                msg += f'   {time_info}\n'
-            msg += f'   📅 领取时间：{assigned_at}\n\n'
+                time_str = f'{total_h}时{total_m}分' if total_m > 0 else f'{total_h}小时'
+            if role == 'root':
+                msg += f'{i}. <code>{code_val}</code> → {_get_who(row)}'
+            else:
+                msg += f'{i}. <code>{code_val}</code>'
+            if time_str:
+                msg += f'  ⏳{time_str}'
+            msg += '\n'
+    else:
+        msg += '<b>【已出库 0 个】</b>\n暂无已出库未使用的码\n'
 
-    await update.message.reply_text(msg, parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(buttons) if buttons else main_kb('admin'))
+    # 未出库部分（只显示数量）
+    msg += f'\n<b>【未出库 {stats["available"]} 个】</b>\n'
+    msg += f'库存中共 <b>{stats["available"]}</b> 个可分配授权码\n'
+
+    await query.edit_message_text(msg, parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton('« 返回', callback_data='query_back')
+        ]])
+    )
 
 
 # ============================================================
@@ -787,6 +807,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data or ''
     uid = query.from_user.id
+
+    if data == 'query_inuse':
+        await _cb_query_inuse(query, uid)
+        return
+
+    if data == 'query_idle':
+        await _cb_query_idle(query, uid)
+        return
+
+    if data == 'query_back':
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton('🔴 使用中', callback_data='query_inuse'),
+            InlineKeyboardButton('🟢 未使用', callback_data='query_idle'),
+        ]])
+        await query.edit_message_text('📋 <b>查询授权码</b>\n请选择查看类型：',
+            parse_mode='HTML', reply_markup=kb)
+        return
 
     if data.startswith('release_'):
         code = data[8:]
