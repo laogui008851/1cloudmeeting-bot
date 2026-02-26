@@ -515,15 +515,45 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # 拉取实时状态算统计
+    stats = db.stock_stats()
+    all_status = await api_get_all_codes_status()
+    now = datetime.now().astimezone()
+
+    in_use_count = 0
+    expired_count = 0
+    for detail in all_status.values():
+        if int(detail.get('in_use') or 0) != 1:
+            continue
+        ea = detail.get('expires_at') or ''
+        if ea:
+            try:
+                exp = datetime.fromisoformat(str(ea).replace('Z', '+00:00'))
+                if exp <= now:
+                    expired_count += 1
+                else:
+                    in_use_count += 1
+            except Exception:
+                in_use_count += 1
+        else:
+            in_use_count += 1  # 无到期时间 = 永久使用中
+
+    issued = stats['assigned']   # 已出库
+    available = stats['available']  # 未出库
+
+    msg = (
+        f'📋 <b>授权码总览</b>\n'
+        f'━━━━━━━━━━━━━━━\n'
+        f'📦 未出库：<b>{available}</b> 个\n'
+        f'📤 已出库：<b>{issued}</b> 个\n'
+        f'🔴 使用中：<b>{in_use_count}</b> 个\n'
+        f'⚠️ 已到期：<b>{expired_count}</b> 个\n'
+    )
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton('🔴 使用中', callback_data='query_inuse'),
         InlineKeyboardButton('🟢 未使用', callback_data='query_idle'),
     ]])
-    await update.message.reply_text(
-        '📋 <b>查询授权码</b>\n请选择查看类型：',
-        parse_mode='HTML',
-        reply_markup=kb,
-    )
+    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=kb)
 
 
 def _get_who(row) -> str:
@@ -825,12 +855,39 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == 'query_back':
+        stats = db.stock_stats()
+        all_status = await api_get_all_codes_status()
+        now = datetime.now().astimezone()
+        in_use_count = 0
+        expired_count = 0
+        for detail in all_status.values():
+            if int(detail.get('in_use') or 0) != 1:
+                continue
+            ea = detail.get('expires_at') or ''
+            if ea:
+                try:
+                    exp = datetime.fromisoformat(str(ea).replace('Z', '+00:00'))
+                    if exp <= now:
+                        expired_count += 1
+                    else:
+                        in_use_count += 1
+                except Exception:
+                    in_use_count += 1
+            else:
+                in_use_count += 1
+        msg = (
+            f'📋 <b>授权码总览</b>\n'
+            f'━━━━━━━━━━━━━━━\n'
+            f'📦 未出库：<b>{stats["available"]}</b> 个\n'
+            f'📤 已出库：<b>{stats["assigned"]}</b> 个\n'
+            f'🔴 使用中：<b>{in_use_count}</b> 个\n'
+            f'⚠️ 已到期：<b>{expired_count}</b> 个\n'
+        )
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton('🔴 使用中', callback_data='query_inuse'),
             InlineKeyboardButton('🟢 未使用', callback_data='query_idle'),
         ]])
-        await query.edit_message_text('📋 <b>查询授权码</b>\n请选择查看类型：',
-            parse_mode='HTML', reply_markup=kb)
+        await query.edit_message_text(msg, parse_mode='HTML', reply_markup=kb)
         return
 
     if data.startswith('release_'):
