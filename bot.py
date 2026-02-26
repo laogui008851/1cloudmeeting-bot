@@ -244,7 +244,7 @@ class DB:
         """ROOT 绑定 Admin。返回 'ok'/'max'/'already'/'is_root'"""
         with self._conn() as conn:
             count = conn.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
-            if count >= 20:
+            if count >= 2:
                 return 'max'
             existing = conn.execute("SELECT role FROM users WHERE telegram_id=?", (tid,)).fetchone()
             if existing and existing['role'] == 'root':
@@ -320,14 +320,7 @@ def main_kb(role=None):
             is_persistent=True,
         )
     else:
-        # 未绑定用户看到绑定按钮
-        return ReplyKeyboardMarkup(
-            [
-                ['🔐1️⃣ 使用者绑定1', '🔐2️⃣ 使用者绑定2'],
-            ],
-            resize_keyboard=True,
-            is_persistent=True,
-        )
+        return None
 
 
 # ============================================================
@@ -340,25 +333,13 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     role = db.get_user_role(user.id)
     if not role:
-        count = db.get_admin_count()
-        if count >= 20:
-            await update.message.reply_text(
-                '☁️ <b>云际会议</b>\n'
-                '━━━━━━━━━━━━━━━\n\n'
-                f'👋 你好，{user.first_name}！\n\n'
-                '⛔ <b>绑定名额已满（20/20）</b>\n\n'
-                '请联系管理员处理。',
-                parse_mode='HTML',
-            )
-            return
         await update.message.reply_text(
             '☁️ <b>云际会议</b>\n'
             '━━━━━━━━━━━━━━━\n\n'
             f'👋 你好，{user.first_name}！\n\n'
-            '您尚未绑定，点击下方按钮即可绑定使用。\n'
-            f'📍 绑定名额：<b>{count}/20</b>',
+            '⛔ 您尚未被授权，请将您的 ID 发给管理员进行绑定：\n\n'
+            f'<code>{user.id}</code>',
             parse_mode='HTML',
-            reply_markup=main_kb(),
         )
         return
 
@@ -400,20 +381,6 @@ async def claim_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
             '⛔ 您尚未被授权，请联系管理员绑定您的 ID：\n'
             f'<code>{user.id}</code>',
             parse_mode='HTML',
-        )
-        return
-
-    # 检查是否已领取过
-    existing = db.get_user_codes(user.id)
-    if existing:
-        code = existing[0]['code']
-        await update.message.reply_text(
-            '⚠️ <b>您已领取过授权码</b>\n'
-            '━━━━━━━━━━━━━━━\n\n'
-            f'🔑 您的授权码：<code>{code}</code>\n\n'
-            '📌 点击「🔍 查询授权码」查看详情',
-            parse_mode='HTML',
-            reply_markup=main_kb('admin'),
         )
         return
 
@@ -549,11 +516,11 @@ async def bind_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         display = f'{target_name} {target_uname}'.strip() or str(target_id)
         await update.message.reply_text(
             f'✅ 已绑定 <b>{display}</b> 为 Admin\n'
-            f'👥 当前已绑定：{len(admins)}/20',
+            f'👥 当前已绑定：{len(admins)}/2',
             parse_mode='HTML',
         )
     elif result == 'max':
-        await update.message.reply_text('❌ 已达到最大绑定数量（20个），请先踢出再绑定。')
+        await update.message.reply_text('❌ 已达到最大绑定数量（2个），请先踢出再绑定。')
     elif result == 'already':
         await update.message.reply_text('⚠️ 该用户已经是 Admin')
     elif result == 'is_root':
@@ -657,40 +624,6 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text('\n'.join(lines), parse_mode='HTML')
             return
 
-    if text in ('🔐1️⃣ 使用者绑定1', '🔐2️⃣ 使用者绑定2'):
-        user = update.effective_user
-        role = db.get_user_role(uid)
-        if role:
-            await update.message.reply_text('✅ 您已绑定，无需重复操作。', reply_markup=main_kb(role))
-            return
-        result = db.bind_admin(uid, user.username, user.first_name)
-        if result == 'ok':
-            admins = db.get_bound_admins()
-            slot = text[-1]  # '1' 或 '2'
-            await update.message.reply_text(
-                f'✅ <b>绑定成功！（使用者{slot}）</b>\n'
-                '━━━━━━━━━━━━━━━\n\n'
-                f'👤 用户：{user.first_name} {("@" + user.username) if user.username else ""}\n'
-                f'👥 已绑定：{len(admins)}/20\n\n'
-                '📌 <b>使用说明：</b>\n'
-                '━━━━━━━━━━━━━━━\n'
-                '🎫 点击「领取授权码」获取会议授权码\n'
-                '🔍 点击「查询授权码」查看已领取的码\n\n'
-                '🟢 <b>创建会议：</b><code>授权码 + 房间号</code>\n'
-                '🔵 <b>加入会议：</b><code>创建者授权码 + 房间号</code>\n\n'
-                '🔓 如需解除绑定，发送 /unbind 即可',
-                parse_mode='HTML',
-                reply_markup=main_kb('admin'),
-            )
-        elif result == 'max':
-            await update.message.reply_text(
-                '❌ 绑定名额已满（20/20），请联系管理员。',
-                reply_markup=main_kb(),
-            )
-        elif result == 'already':
-            await update.message.reply_text('✅ 您已绑定。', reply_markup=main_kb('admin'))
-        return
-
     if text == '🎫 领取授权码':
         await claim_code(update, context)
     elif text == '🔍 查询授权码':
@@ -701,14 +634,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text('请使用下方按钮操作 👇', reply_markup=main_kb(role))
         else:
             await update.message.reply_text(
-                '您尚未绑定，点击下方按钮绑定 👇',
-                reply_markup=main_kb(),
-            )
-
-
-# ============================================================
-#  管理员命令
-# ============================================================
+                    '⛔ 您尚未被授权，请将您的 ID 发给管理员进行绑定：\n\n'
+                    f'<code>{uid}</code>',
+                    parse_mode='HTML',
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid not in ADMIN_IDS:
@@ -730,7 +658,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = (
             '👑 <b>管理面板</b>\n'
             '━━━━━━━━━━━━━━━\n\n'
-            f'👥 已绑定 Admin（{len(admins)}/20）：\n{admin_lines}\n'
+            f'👥 已绑定 Admin（{len(admins)}/2）：\n{admin_lines}\n'
             f'👥 用户总数：{len(users)}\n'
             f'📦 库存总量：{stats["total"]}\n'
             f'🟢 可分发：{stats["available"]}\n'
