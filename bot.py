@@ -523,20 +523,17 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     in_use_count = 0
     expired_count = 0
     for detail in all_status.values():
-        if int(detail.get('in_use') or 0) != 1:
-            continue
         ea = detail.get('expires_at') or ''
         if ea:
             try:
                 exp = datetime.fromisoformat(str(ea).replace('Z', '+00:00'))
                 if exp <= now:
                     expired_count += 1
-                else:
-                    in_use_count += 1
+                    continue
             except Exception:
-                in_use_count += 1
-        else:
-            in_use_count += 1  # 无到期时间 = 永久使用中
+                pass
+        if int(detail.get('in_use') or 0) == 1:
+            in_use_count += 1
 
     issued = stats['assigned']   # 已出库
     available = stats['available']  # 未出库
@@ -859,19 +856,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         in_use_count = 0
         expired_count = 0
         for detail in all_status.values():
-            if int(detail.get('in_use') or 0) != 1:
-                continue
             ea = detail.get('expires_at') or ''
             if ea:
                 try:
                     exp = datetime.fromisoformat(str(ea).replace('Z', '+00:00'))
                     if exp <= now:
                         expired_count += 1
-                    else:
-                        in_use_count += 1
+                        continue
                 except Exception:
-                    in_use_count += 1
-            else:
+                    pass
+            if int(detail.get('in_use') or 0) == 1:
                 in_use_count += 1
         total = stats['available'] + stats['assigned']
         msg = (
