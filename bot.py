@@ -589,28 +589,35 @@ async def _cb_query_inuse(query, uid: int):
         )
         return
 
-    msg = f'🔴 <b>使用中（{len(active)}个）</b>\n━━━━━━━━━━━━━━━\n\n'
+    total = len(active) + len(expired_list)
+    msg = f'🔴 <b>使用中 {len(active)} 个 / 已过期 {len(expired_list)} 个</b>'
     buttons = []
-    for i, (row, detail, remaining) in enumerate(active, 1):
+    for row, detail, remaining in active:
         code_val = row['code']
         bound_room = detail.get('bound_room') or ''
-        status_str = '🔴 使用中'
+        label = code_val
         if bound_room:
-            status_str += f'（{bound_room}）'
-        time_str = ''
+            label += f'  {bound_room}'
         if remaining:
             h = int(remaining.total_seconds() // 3600)
             m = int((remaining.total_seconds() % 3600) // 60)
-            time_str = f'⏱ 剩余 {h}时{m}分'
-        msg += f'{i}. <code>{code_val}</code>\n'
-        msg += f'   {status_str}\n'
-        if time_str:
-            msg += f'   {time_str}\n'
-        msg += '\n'
-        buttons.append([InlineKeyboardButton(f'🔴 结束会议 {code_val}', callback_data=f'release_{code_val}')])
+            label += f'  ⏱{h}时{m}分'
+        buttons.append([
+            InlineKeyboardButton(f'🔴 {label}', callback_data='noop'),
+            InlineKeyboardButton('结束会议', callback_data=f'release_{code_val}'),
+        ])
 
     if expired_list:
-        msg += f'⚠️ <b>已过期：{len(expired_list)} 个</b>（计时已结束，可结束会议释放）\n'
+        for row, detail in expired_list:
+            code_val = row['code']
+            bound_room = detail.get('bound_room') or ''
+            label = f'⚠️ {code_val}'
+            if bound_room:
+                label += f'  {bound_room}'
+            buttons.append([
+                InlineKeyboardButton(label, callback_data='noop'),
+                InlineKeyboardButton('结束会议', callback_data=f'release_{code_val}'),
+            ])
 
     buttons.append([InlineKeyboardButton('« 返回', callback_data='query_back')])
     await query.edit_message_text(msg, parse_mode='HTML',
@@ -794,6 +801,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data or ''
     uid = query.from_user.id
+
+    if data == 'noop':
+        return
 
     if data == 'query_inuse':
         await _cb_query_inuse(query, uid)
