@@ -244,7 +244,7 @@ class DB:
         """ROOT 绑定 Admin。返回 'ok'/'max'/'already'/'is_root'"""
         with self._conn() as conn:
             count = conn.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
-            if count >= 2:
+            if count >= 20:
                 return 'max'
             existing = conn.execute("SELECT role FROM users WHERE telegram_id=?", (tid,)).fetchone()
             if existing and existing['role'] == 'root':
@@ -287,8 +287,24 @@ class DB:
 
 db = DB()
 
-
-
+# 45个预置授权码，每次启动时检查并补入（部署不会丢失）
+_PRESET_CODES = [
+    '7CZTHNUF','2B4ET2Y6','UPDUA7TX','PQEYB8QL','K4PAKGQ7','JTSYMLSH','VCWY8ZYJ',
+    '45Z37KVU','6AR9J9NZ','KXHDSDKR','9W4HS57T','4Y52U7Z3','MC2ZM2LL','B3ZGK3CM',
+    'CAGQEFWE','QFB6ZVSP','M652KJTQ','22V5A45D','Q6LJHRZ9','TRJ2SHJE','T7EFW9AY',
+    'AKR5YVML','GGSN6GJ2','J44B8ZMH','BW3H7GFC','Q3MZA7KR','SFWGD9J9','QZFFTPVR',
+    'Z6JP2FBJ','P343G9V4','37VN9RLM','G2ZEXKFK','VDQ2RCKK','C6YXFDGG','LLZTJFAC',
+    'L498JEAR','Q37HTQVM','8QW6N2QC','VDUE9DLK','CML6BYAP','EKGYA5UQ','DWDLRQZ2',
+    'Z64PCTNY','L2BJXVQL','NW4E6R7V',
+]
+def seed_codes():
+    added = 0
+    for code in _PRESET_CODES:
+        if db.add_code(code, note='预置码'):
+            added += 1
+    if added:
+        logger.info(f'预置授权码：新增 {added} 个入库')
+seed_codes()
 
 
 # ============================================================
@@ -325,12 +341,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     role = db.get_user_role(user.id)
     if not role:
         count = db.get_admin_count()
-        if count >= 2:
+        if count >= 20:
             await update.message.reply_text(
                 '☁️ <b>云际会议</b>\n'
                 '━━━━━━━━━━━━━━━\n\n'
                 f'👋 你好，{user.first_name}！\n\n'
-                '⛔ <b>绑定名额已满（2/2）</b>\n\n'
+                '⛔ <b>绑定名额已满（20/20）</b>\n\n'
                 '请联系管理员处理。',
                 parse_mode='HTML',
             )
@@ -340,7 +356,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             '━━━━━━━━━━━━━━━\n\n'
             f'👋 你好，{user.first_name}！\n\n'
             '您尚未绑定，点击下方按钮即可绑定使用。\n'
-            f'📍 绑定名额：<b>{count}/2</b>',
+            f'📍 绑定名额：<b>{count}/20</b>',
             parse_mode='HTML',
             reply_markup=main_kb(),
         )
@@ -439,8 +455,37 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    rows = db.get_user_codes(user.id)
     stats = db.stock_stats()
+    role = db.get_user_role(user.id)
+
+    # ROOT 看全部已发出的码
+    if role == 'root':
+        with db._conn() as conn:
+            all_rows = conn.execute(
+                "SELECT acp.*, u.first_name, u.username FROM auth_code_pool acp "
+                "LEFT JOIN users u ON acp.assigned_to = u.telegram_id "
+                "WHERE acp.status='assigned' ORDER BY acp.assigned_at DESC"
+            ).fetchall()
+        if not all_rows:
+            await update.message.reply_text(
+                f'📋 <b>已发出授权码</b>\n\n暂无已发出的码。\n📦 库存可用：<b>{stats["available"]}</b>',
+                parse_mode='HTML', reply_markup=main_kb(role)
+            )
+            return
+        msg = f'📋 <b>已发出授权码（共{len(all_rows)}个）</b>\n📦 库存剩余：<b>{stats["available"]}</b>\n━━━━━━━━━━━━━━━\n\n'
+        for i, row in enumerate(all_rows, 1):
+            at = (row['assigned_at'] or '')[:16].replace('T', ' ')
+            if row['assigned_to'] == 0 or not row['assigned_to']:
+                who = '管理员发放'
+            else:
+                uname = row['username'] or ''
+                fname = row['first_name'] or str(row['assigned_to'])
+                who = f'{fname}{ ("@"+uname) if uname else ""}'
+            msg += f'{i}. <code>{row["code"]}</code>  →  {who}\n   📅 {at}\n'
+        await update.message.reply_text(msg, parse_mode='HTML', reply_markup=main_kb(role))
+        return
+
+    rows = db.get_user_codes(user.id)
 
     if not rows:
         await update.message.reply_text(
@@ -504,11 +549,11 @@ async def bind_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         display = f'{target_name} {target_uname}'.strip() or str(target_id)
         await update.message.reply_text(
             f'✅ 已绑定 <b>{display}</b> 为 Admin\n'
-            f'👥 当前已绑定：{len(admins)}/2',
+            f'👥 当前已绑定：{len(admins)}/20',
             parse_mode='HTML',
         )
     elif result == 'max':
-        await update.message.reply_text('❌ 已达到最大绑定数量（2个），请先踢出再绑定。')
+        await update.message.reply_text('❌ 已达到最大绑定数量（20个），请先踢出再绑定。')
     elif result == 'already':
         await update.message.reply_text('⚠️ 该用户已经是 Admin')
     elif result == 'is_root':
@@ -626,7 +671,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f'✅ <b>绑定成功！（使用者{slot}）</b>\n'
                 '━━━━━━━━━━━━━━━\n\n'
                 f'👤 用户：{user.first_name} {("@" + user.username) if user.username else ""}\n'
-                f'👥 已绑定：{len(admins)}/2\n\n'
+                f'👥 已绑定：{len(admins)}/20\n\n'
                 '📌 <b>使用说明：</b>\n'
                 '━━━━━━━━━━━━━━━\n'
                 '🎫 点击「领取授权码」获取会议授权码\n'
@@ -639,7 +684,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         elif result == 'max':
             await update.message.reply_text(
-                '❌ 绑定名额已满（2/2），请联系管理员。',
+                '❌ 绑定名额已满（20/20），请联系管理员。',
                 reply_markup=main_kb(),
             )
         elif result == 'already':
@@ -685,7 +730,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = (
             '👑 <b>管理面板</b>\n'
             '━━━━━━━━━━━━━━━\n\n'
-            f'👥 已绑定 Admin（{len(admins)}/2）：\n{admin_lines}\n'
+            f'👥 已绑定 Admin（{len(admins)}/20）：\n{admin_lines}\n'
             f'👥 用户总数：{len(users)}\n'
             f'📦 库存总量：{stats["total"]}\n'
             f'🟢 可分发：{stats["available"]}\n'
@@ -693,6 +738,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             '📌 <b>命令：</b>\n'
             '/bind &lt;ID&gt; — 绑定 Admin\n'
             '/kick &lt;ID&gt; — 踢出 Admin\n'
+            '/admin getcodes &lt;数量&gt; — 批量取码发放\n'
             '/admin codes — 查看库存列表\n'
             '/admin delcode &lt;码&gt; — 删除未分发的码\n'
             '/admin users — 查看用户列表\n'
@@ -703,6 +749,35 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     sub = args[0].lower()
+
+    # /admin getcodes <数量> — 批量取出N个码（发放给团队）
+    if sub == 'getcodes':
+        n = int(args[1]) if len(args) > 1 and args[1].isdigit() else 1
+        n = min(n, 50)  # 最多一次取50个
+        with db._conn() as conn:
+            rows = conn.execute(
+                "SELECT pool_id, code FROM auth_code_pool WHERE status='available' ORDER BY pool_id LIMIT ?", (n,)
+            ).fetchall()
+            if not rows:
+                await update.message.reply_text('❌ 库存为空')
+                return
+            ids = [r['pool_id'] for r in rows]
+            placeholders = ','.join('?' * len(ids))
+            conn.execute(
+                f"UPDATE auth_code_pool SET status='assigned', assigned_to=0, assigned_at=? WHERE pool_id IN ({placeholders})",
+                [datetime.now().isoformat()] + ids
+            )
+            conn.commit()
+        stat = db.stock_stats()
+        code_lines = '\n'.join(f'<code>{r["code"]}</code>' for r in rows)
+        await update.message.reply_text(
+            f'✅ <b>已取出 {len(rows)} 个授权码</b>\n'
+            f'📦 库存剩余可用：<b>{stat["available"]}</b>\n'
+            f'━━━━━━━━━━━━━━━\n\n'
+            f'{code_lines}',
+            parse_mode='HTML'
+        )
+        return
 
     # /admin addcode <码> [备注]
     if sub == 'addcode':
