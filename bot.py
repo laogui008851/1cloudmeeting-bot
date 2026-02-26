@@ -13,7 +13,8 @@
 import asyncio
 import logging
 import os
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import aiohttp
 from pathlib import Path
 from datetime import datetime
@@ -44,12 +45,8 @@ OWNER_ID     = int(os.getenv('OWNER_TELEGRAM_ID', '0'))
 ADMIN_IDS    = {int(x) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip().isdigit()}
 ADMIN_IDS.add(OWNER_ID)
 MEET_API_URL = os.getenv('MEET_API_URL', 'https://meet.f13f2f75.org')
-# 自己独立的数据库
-LOCAL_DB = Path(os.getenv(
-    'LOCAL_DB_PATH',
-    str(Path(__file__).parent / 'data' / 'bot.db')
-))
-# 主机器人数据库（用于注册自身为代理）
+DATABASE_URL = os.getenv('DATABASE_URL', '')
+# 主机器人数据库（本地注册用，远端部署时跳过）
 MASTER_DB = Path(os.getenv(
     'MASTER_DB_PATH',
     str(Path(__file__).parent.parent / 'cloudmeeting-bot' / 'data' / 'master_bot.db')
@@ -60,16 +57,12 @@ logger = logging.getLogger(__name__)
 
 
 def register_to_master():
-    """启动时将自身 BOT_TOKEN + OWNER_ID + 本地DB路径 注册进主机器人 agents 表"""
+    """启动时注册进主机器人（本地SQLite，远端部署时自动跳过）"""
     if not MASTER_DB.exists():
-        logger.warning(f'主机器人数据库不存在，跳过注册: {MASTER_DB}')
-        return
-    if not BOT_TOKEN or not OWNER_ID:
-        logger.warning('BOT_TOKEN 或 OWNER_ID 未设置，跳过注册')
         return
     try:
+        import sqlite3
         conn = sqlite3.connect(str(MASTER_DB))
-        # 确保列存在
         cols = {r[1] for r in conn.execute('PRAGMA table_info(agents)').fetchall()}
         if 'local_db_path' not in cols:
             conn.execute('ALTER TABLE agents ADD COLUMN local_db_path TEXT')
@@ -81,226 +74,290 @@ def register_to_master():
                 bot_token = excluded.bot_token,
                 local_db_path = excluded.local_db_path,
                 joined_at = excluded.joined_at
-        ''', (OWNER_ID, '', '自用克隆机器人', now, '', BOT_TOKEN, str(LOCAL_DB)))
+        ''', (OWNER_ID, '', '自用克隆机器人', now, '', BOT_TOKEN, ''))
         conn.commit()
         conn.close()
-        logger.info(f'已向主机器人注册: owner={OWNER_ID}, db={LOCAL_DB}')
+        logger.info(f'已向主机器人注册: owner={OWNER_ID}')
     except Exception as e:
         logger.warning(f'注册主机器人失败（不影响运行）: {e}')
 
 
 
 # ============================================================
-#  本地数据库
-#  auth_code_pool = 管理员从主机器人购买/接收后存进来的授权码
+#  远程数据库 (PostgreSQL / Neon)
 # ============================================================
 class DB:
+    def _conn(self):
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+
+    def _cur(self, conn):
+        return conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
     def __init__(self):
-        conn = sqlite3.connect(str(LOCAL_DB))
-        conn.row_factory = sqlite3.Row
+        conn = self._conn()
         cur = conn.cursor()
-        # 用户表
         cur.execute('''
             CREATE TABLE IF NOT EXISTS users (
-                telegram_id INTEGER PRIMARY KEY,
+                telegram_id BIGINT PRIMARY KEY,
                 username    TEXT,
                 first_name  TEXT,
                 first_seen  TEXT NOT NULL,
                 role        TEXT DEFAULT NULL
             )
         ''')
-        # 授权码本地库存（管理员 addcode 进来的）
         cur.execute('''
             CREATE TABLE IF NOT EXISTS auth_code_pool (
-                pool_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                pool_id     SERIAL PRIMARY KEY,
                 code        TEXT UNIQUE NOT NULL,
                 status      TEXT NOT NULL DEFAULT 'available',
-                assigned_to INTEGER,
+                assigned_to BIGINT,
                 assigned_at TEXT,
                 note        TEXT DEFAULT '',
-                added_at    TEXT NOT NULL DEFAULT (datetime('now','localtime'))
+                added_at    TEXT NOT NULL DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD HH24:MI:SS')
             )
         ''')
         # 迁移：为旧数据库添加 role 列
-        cols = {r[1] for r in cur.execute('PRAGMA table_info(users)').fetchall()}
-        if 'role' not in cols:
-            cur.execute("ALTER TABLE users ADD COLUMN role TEXT DEFAULT NULL")
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name='users' AND column_name='role'
+        """)
+        if not cur.fetchone():
+            cur.execute('ALTER TABLE users ADD COLUMN role TEXT DEFAULT NULL')
         # 确保 OWNER 始终是 root
         if OWNER_ID:
             cur.execute(
                 "INSERT INTO users (telegram_id, username, first_name, first_seen, role) "
-                "VALUES (?, '', 'ROOT', ?, 'root') "
+                "VALUES (%s, '', 'ROOT', %s, 'root') "
                 "ON CONFLICT(telegram_id) DO UPDATE SET role='root'",
                 (OWNER_ID, datetime.now().isoformat())
             )
         conn.commit()
         conn.close()
 
-    def _conn(self):
-        conn = sqlite3.connect(str(LOCAL_DB))
-        conn.row_factory = sqlite3.Row
-        return conn
-
     # ---- 用户 ----
     def track_user(self, tid: int, username: str = None, first_name: str = None):
-        with self._conn() as conn:
-            conn.execute(
+        conn = self._conn()
+        try:
+            cur = self._cur(conn)
+            cur.execute(
                 'INSERT INTO users (telegram_id, username, first_name, first_seen) '
-                'VALUES (?, ?, ?, ?) '
-                'ON CONFLICT(telegram_id) DO UPDATE SET username=?, first_name=?',
+                'VALUES (%s, %s, %s, %s) '
+                'ON CONFLICT(telegram_id) DO UPDATE SET username=%s, first_name=%s',
                 (tid, username, first_name, datetime.now().isoformat(), username, first_name)
             )
             conn.commit()
+        finally:
+            conn.close()
 
     def get_all_users(self):
-        with self._conn() as conn:
-            return conn.execute('SELECT * FROM users ORDER BY first_seen DESC').fetchall()
+        conn = self._conn()
+        try:
+            cur = self._cur(conn)
+            cur.execute('SELECT * FROM users ORDER BY first_seen DESC')
+            return cur.fetchall()
+        finally:
+            conn.close()
 
     # ---- 授权码库存 ----
     def add_code(self, code: str, note: str = '') -> bool:
-        """管理员把从主机器人拿到的授权码存入本地库"""
+        conn = self._conn()
         try:
-            with self._conn() as conn:
-                conn.execute(
-                    'INSERT INTO auth_code_pool (code, note) VALUES (?, ?)',
-                    (code.strip().upper(), note)
-                )
-                conn.commit()
-            return True
-        except sqlite3.IntegrityError:
-            return False  # 重复
+            cur = self._cur(conn)
+            cur.execute(
+                'INSERT INTO auth_code_pool (code, note) VALUES (%s, %s) ON CONFLICT DO NOTHING',
+                (code.strip().upper(), note)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+        except Exception:
+            conn.rollback()
+            return False
+        finally:
+            conn.close()
 
     def assign_code(self, telegram_id: int) -> str | None:
-        """从库存取一个可用码分配给用户"""
-        with self._conn() as conn:
-            row = conn.execute(
+        conn = self._conn()
+        try:
+            cur = self._cur(conn)
+            cur.execute(
                 "SELECT pool_id, code FROM auth_code_pool WHERE status='available' ORDER BY pool_id LIMIT 1"
-            ).fetchone()
+            )
+            row = cur.fetchone()
             if not row:
                 return None
-            conn.execute(
-                "UPDATE auth_code_pool SET status='assigned', assigned_to=?, assigned_at=? WHERE pool_id=?",
+            cur.execute(
+                "UPDATE auth_code_pool SET status='assigned', assigned_to=%s, assigned_at=%s WHERE pool_id=%s",
                 (telegram_id, datetime.now().isoformat(), row['pool_id'])
             )
             conn.commit()
             return row['code']
+        finally:
+            conn.close()
 
     def get_user_codes(self, telegram_id: int):
-        """获取用户已领取的所有码"""
-        with self._conn() as conn:
-            return conn.execute(
-                "SELECT * FROM auth_code_pool WHERE assigned_to=? ORDER BY assigned_at DESC",
+        conn = self._conn()
+        try:
+            cur = self._cur(conn)
+            cur.execute(
+                "SELECT * FROM auth_code_pool WHERE assigned_to=%s ORDER BY assigned_at DESC",
                 (telegram_id,)
-            ).fetchall()
+            )
+            return cur.fetchall()
+        finally:
+            conn.close()
 
     def assign_code_to(self, telegram_id: int, code: str) -> bool:
-        """将指定的码分配给用户（用于 Vercel 拉取的码记录到本地）"""
+        conn = self._conn()
         try:
-            with self._conn() as conn:
-                conn.execute(
-                    "UPDATE auth_code_pool SET status='assigned', assigned_to=?, assigned_at=? WHERE code=? AND status='available'",
-                    (telegram_id, datetime.now().isoformat(), code.upper())
-                )
-                conn.commit()
+            cur = self._cur(conn)
+            cur.execute(
+                "UPDATE auth_code_pool SET status='assigned', assigned_to=%s, assigned_at=%s WHERE code=%s AND status='available'",
+                (telegram_id, datetime.now().isoformat(), code.upper())
+            )
+            conn.commit()
             return True
         except Exception:
+            conn.rollback()
             return False
+        finally:
+            conn.close()
 
     def stock_stats(self) -> dict:
-        with self._conn() as conn:
-            total     = conn.execute("SELECT COUNT(*) FROM auth_code_pool").fetchone()[0]
-            available = conn.execute("SELECT COUNT(*) FROM auth_code_pool WHERE status='available'").fetchone()[0]
-            assigned  = conn.execute("SELECT COUNT(*) FROM auth_code_pool WHERE status='assigned'").fetchone()[0]
-        return {'total': total, 'available': available, 'assigned': assigned}
+        conn = self._conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM auth_code_pool")
+            total = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM auth_code_pool WHERE status='available'")
+            available = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM auth_code_pool WHERE status='assigned'")
+            assigned = cur.fetchone()[0]
+            return {'total': total, 'available': available, 'assigned': assigned}
+        finally:
+            conn.close()
 
     def delete_code(self, code: str) -> bool:
-        """只允许删除还未分配的码"""
-        with self._conn() as conn:
-            cur = conn.execute(
-                "DELETE FROM auth_code_pool WHERE code=? AND status='available'",
+        conn = self._conn()
+        try:
+            cur = self._cur(conn)
+            cur.execute(
+                "DELETE FROM auth_code_pool WHERE code=%s AND status='available'",
                 (code.upper(),)
             )
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
 
     def release_code(self, pool_id: int, operator_id: int) -> bool:
-        """释放码：改回可用状态，admin只能释放自己的，root可释放任何人的"""
-        with self._conn() as conn:
+        conn = self._conn()
+        try:
+            cur = self._cur(conn)
             if operator_id == OWNER_ID:
-                cur = conn.execute(
-                    "UPDATE auth_code_pool SET status='available', assigned_to=NULL, assigned_at=NULL WHERE pool_id=? AND status='assigned'",
+                cur.execute(
+                    "UPDATE auth_code_pool SET status='available', assigned_to=NULL, assigned_at=NULL WHERE pool_id=%s AND status='assigned'",
                     (pool_id,)
                 )
             else:
-                cur = conn.execute(
-                    "UPDATE auth_code_pool SET status='available', assigned_to=NULL, assigned_at=NULL WHERE pool_id=? AND assigned_to=? AND status='assigned'",
+                cur.execute(
+                    "UPDATE auth_code_pool SET status='available', assigned_to=NULL, assigned_at=NULL WHERE pool_id=%s AND assigned_to=%s AND status='assigned'",
                     (pool_id, operator_id)
                 )
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
 
     def list_codes(self, limit: int = 30):
-        with self._conn() as conn:
-            return conn.execute(
-                "SELECT * FROM auth_code_pool ORDER BY pool_id DESC LIMIT ?", (limit,)
-            ).fetchall()
+        conn = self._conn()
+        try:
+            cur = self._cur(conn)
+            cur.execute("SELECT * FROM auth_code_pool ORDER BY pool_id DESC LIMIT %s", (limit,))
+            return cur.fetchall()
+        finally:
+            conn.close()
 
     # ---- 绑定 / 角色 ----
     def get_user_role(self, tid: int) -> str | None:
-        """获取用户角色：'root' / 'admin' / None"""
         if tid == OWNER_ID:
             return 'root'
-        with self._conn() as conn:
-            row = conn.execute("SELECT role FROM users WHERE telegram_id=?", (tid,)).fetchone()
+        conn = self._conn()
+        try:
+            cur = self._cur(conn)
+            cur.execute("SELECT role FROM users WHERE telegram_id=%s", (tid,))
+            row = cur.fetchone()
             return row['role'] if row else None
+        finally:
+            conn.close()
 
     def is_authorized(self, tid: int) -> bool:
-        """判断用户是否有权使用机器人"""
         return self.get_user_role(tid) in ('root', 'admin')
 
     def bind_admin(self, tid: int, username: str = None, first_name: str = None) -> str:
-        """ROOT 绑定 Admin。返回 'ok'/'max'/'already'/'is_root'"""
-        with self._conn() as conn:
-            count = conn.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
-            if count >= 2:
+        conn = self._conn()
+        try:
+            cur = self._cur(conn)
+            cur.execute("SELECT COUNT(*) as c FROM users WHERE role='admin'")
+            if cur.fetchone()['c'] >= 2:
                 return 'max'
-            existing = conn.execute("SELECT role FROM users WHERE telegram_id=?", (tid,)).fetchone()
+            cur.execute("SELECT role FROM users WHERE telegram_id=%s", (tid,))
+            existing = cur.fetchone()
             if existing and existing['role'] == 'root':
                 return 'is_root'
             if existing and existing['role'] == 'admin':
                 return 'already'
-            conn.execute(
+            cur.execute(
                 "INSERT INTO users (telegram_id, username, first_name, first_seen, role) "
-                "VALUES (?, ?, ?, ?, 'admin') "
+                "VALUES (%s, %s, %s, %s, 'admin') "
                 "ON CONFLICT(telegram_id) DO UPDATE SET role='admin', "
-                "username=COALESCE(?, username), first_name=COALESCE(?, first_name)",
-                (tid, username or '', first_name or '', datetime.now().isoformat(), username, first_name)
+                "username=COALESCE(EXCLUDED.username, users.username), "
+                "first_name=COALESCE(EXCLUDED.first_name, users.first_name)",
+                (tid, username or '', first_name or '', datetime.now().isoformat())
             )
             conn.commit()
             return 'ok'
+        finally:
+            conn.close()
 
     def unbind_user(self, tid: int) -> bool:
-        """解除 admin 绑定"""
-        with self._conn() as conn:
-            cur = conn.execute("UPDATE users SET role=NULL WHERE telegram_id=? AND role='admin'", (tid,))
+        conn = self._conn()
+        try:
+            cur = self._cur(conn)
+            cur.execute("UPDATE users SET role=NULL WHERE telegram_id=%s AND role='admin'", (tid,))
             conn.commit()
             return cur.rowcount > 0
+        finally:
+            conn.close()
 
     def get_bound_admins(self) -> list:
-        """获取所有已绑定 Admin（不含 ROOT）"""
-        with self._conn() as conn:
-            return conn.execute("SELECT * FROM users WHERE role='admin' ORDER BY first_seen").fetchall()
+        conn = self._conn()
+        try:
+            cur = self._cur(conn)
+            cur.execute("SELECT * FROM users WHERE role='admin' ORDER BY first_seen")
+            return cur.fetchall()
+        finally:
+            conn.close()
 
     def get_admin_count(self) -> int:
-        with self._conn() as conn:
-            return conn.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
+        conn = self._conn()
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
+            return cur.fetchone()[0]
+        finally:
+            conn.close()
 
     def get_user_info(self, tid):
-        """按 telegram_id 获取用户信息"""
         if not tid:
             return None
-        with self._conn() as conn:
-            return conn.execute("SELECT * FROM users WHERE telegram_id=?", (tid,)).fetchone()
+        conn = self._conn()
+        try:
+            cur = self._cur(conn)
+            cur.execute("SELECT * FROM users WHERE telegram_id=%s", (tid,))
+            return cur.fetchone()
+        finally:
+            conn.close()
 
 
 db = DB()
@@ -344,24 +401,32 @@ def seed_codes():
             added += 1
     if added:
         logger.info(f'预置授权码：新增 {added} 个入库')
-    with db._conn() as conn:
+    conn = db._conn()
+    try:
+        cur = db._cur(conn)
+        now_str = datetime.now().isoformat()
         # 标记已发出的码
         for code in _ISSUED_CODES:
-            conn.execute(
-                "UPDATE auth_code_pool SET status='assigned', assigned_to=0, assigned_at=COALESCE(assigned_at, datetime('now','localtime')) WHERE code=? AND status='available'",
-                (code,)
+            cur.execute(
+                "UPDATE auth_code_pool SET status='assigned', assigned_to=0, "
+                "assigned_at=COALESCE(assigned_at, %s) WHERE code=%s AND status='available'",
+                (now_str, code)
             )
-        # 导入外部码（如不存在则插入，并关联到正确用户）
+        # 导入外部码
         for code, uid in _EXTERNAL_CODES.items():
-            conn.execute(
-                "INSERT OR IGNORE INTO users(telegram_id, username, first_name, first_seen, role) VALUES(?,?,?,datetime('now','localtime'),?)",
-                (uid, '', f'用户{uid}', 'admin')
+            cur.execute(
+                "INSERT INTO users(telegram_id, username, first_name, first_seen, role) "
+                "VALUES(%s, '', %s, %s, 'admin') ON CONFLICT DO NOTHING",
+                (uid, f'用户{uid}', now_str)
             )
-            conn.execute(
-                "INSERT OR IGNORE INTO auth_code_pool(code, status, assigned_to, assigned_at) VALUES(?,?,?,datetime('now','localtime'))",
-                (code, 'assigned', uid)
+            cur.execute(
+                "INSERT INTO auth_code_pool(code, status, assigned_to, assigned_at) "
+                "VALUES(%s, 'assigned', %s, %s) ON CONFLICT DO NOTHING",
+                (code, uid, now_str)
             )
         conn.commit()
+    finally:
+        conn.close()
 seed_codes()
 
 
@@ -576,20 +641,25 @@ def _get_who(row) -> str:
 async def _cb_query_inuse(query, uid: int):
     """回调：使用中的码 —— 只显示到期倒计时，不显示码本身"""
     role = db.get_user_role(uid)
-    with db._conn() as conn:
+    conn = db._conn()
+    try:
+        cur = db._cur(conn)
         if role == 'root':
-            rows = conn.execute(
+            cur.execute(
                 "SELECT acp.*, u.first_name, u.username FROM auth_code_pool acp "
                 "LEFT JOIN users u ON acp.assigned_to = u.telegram_id "
                 "WHERE acp.status='assigned' ORDER BY acp.assigned_at DESC"
-            ).fetchall()
+            )
         else:
-            rows = conn.execute(
+            cur.execute(
                 "SELECT acp.*, u.first_name, u.username FROM auth_code_pool acp "
                 "LEFT JOIN users u ON acp.assigned_to = u.telegram_id "
-                "WHERE acp.assigned_to=? AND acp.status='assigned'",
+                "WHERE acp.assigned_to=%s AND acp.status='assigned'",
                 (uid,)
-            ).fetchall()
+            )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
 
     all_status = await api_get_all_codes_status()
 
@@ -665,20 +735,25 @@ async def _cb_query_idle(query, uid: int):
     role = db.get_user_role(uid)
     stats = db.stock_stats()
 
-    with db._conn() as conn:
+    conn = db._conn()
+    try:
+        cur = db._cur(conn)
         if role == 'root':
-            rows = conn.execute(
+            cur.execute(
                 "SELECT acp.*, u.first_name, u.username FROM auth_code_pool acp "
                 "LEFT JOIN users u ON acp.assigned_to = u.telegram_id "
                 "WHERE acp.status='assigned' ORDER BY acp.assigned_at DESC"
-            ).fetchall()
+            )
         else:
-            rows = conn.execute(
+            cur.execute(
                 "SELECT acp.*, u.first_name, u.username FROM auth_code_pool acp "
                 "LEFT JOIN users u ON acp.assigned_to = u.telegram_id "
-                "WHERE acp.assigned_to=? AND acp.status='assigned'",
+                "WHERE acp.assigned_to=%s AND acp.status='assigned'",
                 (uid,)
-            ).fetchall()
+            )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
 
     all_status = await api_get_all_codes_status()
     now = datetime.now().astimezone()
@@ -990,20 +1065,26 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if sub == 'getcodes':
         n = int(args[1]) if len(args) > 1 and args[1].isdigit() else 1
         n = min(n, 50)  # 最多一次取50个
-        with db._conn() as conn:
-            rows = conn.execute(
-                "SELECT pool_id, code FROM auth_code_pool WHERE status='available' ORDER BY pool_id LIMIT ?", (n,)
-            ).fetchall()
+        conn = db._conn()
+        try:
+            cur = db._cur(conn)
+            cur.execute(
+                "SELECT pool_id, code FROM auth_code_pool WHERE status='available' ORDER BY pool_id LIMIT %s", (n,)
+            )
+            rows = cur.fetchall()
             if not rows:
                 await update.message.reply_text('❌ 库存为空')
+                conn.close()
                 return
             ids = [r['pool_id'] for r in rows]
-            placeholders = ','.join('?' * len(ids))
-            conn.execute(
-                f"UPDATE auth_code_pool SET status='assigned', assigned_to=0, assigned_at=? WHERE pool_id IN ({placeholders})",
+            placeholders = ','.join(['%s'] * len(ids))
+            cur.execute(
+                f"UPDATE auth_code_pool SET status='assigned', assigned_to=0, assigned_at=%s WHERE pool_id IN ({placeholders})",
                 [datetime.now().isoformat()] + ids
             )
             conn.commit()
+        finally:
+            conn.close()
         stat = db.stock_stats()
         code_lines = '\n'.join(f'<code>{r["code"]}</code>' for r in rows)
         await update.message.reply_text(
