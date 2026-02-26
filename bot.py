@@ -339,20 +339,28 @@ def seed_codes():
 seed_codes()
 
 
-async def api_get_code_status(code: str) -> dict:
-    """查询单个授权码的实时状态（房间、剩余时间等）"""
+async def api_get_all_codes_status() -> dict:
+    """一次性拉取所有授权码实时状态，返回以 code 为 key 的 dict"""
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                f'{MEET_API_URL}/api/join',
-                params={'code': code},
-                timeout=aiohttp.ClientTimeout(total=10),
+                f'{MEET_API_URL}/api/admin-code',
+                params={'action': 'list', 'limit': '500'},
+                timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status == 200:
-                    return await resp.json()
+                    data = await resp.json()
+                    codes = data.get('codes', [])
+                    return {c['code']: c for c in codes if c.get('code')}
     except Exception as e:
         logger.debug(f'查询码状态失败: {e}')
     return {}
+
+
+async def api_get_code_status(code: str) -> dict:
+    """查询单个授权码实时状态（兼容旧调用）"""
+    all_status = await api_get_all_codes_status()
+    return all_status.get(code, {})
 
 
 async def api_release_code(code: str) -> bool:
@@ -500,6 +508,7 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         msg = f'📋 <b>已发出授权码（共{len(all_rows)}个）</b>\n📦 库存剩余：<b>{stats["available"]}</b>\n━━━━━━━━━━━━━━━\n\n'
         buttons = []
+        all_status = await api_get_all_codes_status()
         for i, row in enumerate(all_rows, 1):
             at = (row['assigned_at'] or '')[:16].replace('T', ' ')
             if row['assigned_to'] == 0 or not row['assigned_to']:
@@ -510,18 +519,18 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 who = f'{fname}{ ("@"+uname) if uname else ""}'
 
             code_val = row['code']
-            detail = await api_get_code_status(code_val)
-            in_use = detail.get('in_use') or detail.get('inUse', False)
-            bound_room = detail.get('bound_room') or detail.get('boundRoom') or detail.get('roomName', '')
-            expires_at = detail.get('expires_at') or detail.get('expiresAt', '')
-            expires_minutes = detail.get('expires_minutes') or detail.get('expiresMinutes', 0)
+            detail = all_status.get(code_val, {})
+            in_use = int(detail.get('in_use') or 0) == 1
+            bound_room = detail.get('bound_room') or ''
+            expires_at = detail.get('expires_at') or ''
+            expires_minutes = detail.get('expires_minutes') or 0
 
             if in_use:
                 status = '🔴 使用中'
                 if bound_room:
                     status += f'（{bound_room}）'
                 time_info = ''
-                if expires_at and str(expires_at) not in ('9999-12-31T00:00:00', 'None', ''):
+                if expires_at:
                     try:
                         exp = datetime.fromisoformat(str(expires_at).replace('Z', '+00:00'))
                         remaining = exp - datetime.now(exp.tzinfo)
@@ -572,24 +581,24 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = '📋 <b>我的授权码</b>\n━━━━━━━━━━━━━━━\n\n'
     msg += f'📦 库存剩余可用：<b>{stats["available"]}</b>\n\n'
 
+    all_status = await api_get_all_codes_status()
     buttons = []
     for i, row in enumerate(rows, 1):
         code_val = row['code']
         assigned_at = (row['assigned_at'] or '')[:16].replace('T', ' ')
 
-        # 查 Vercel 实时状态
-        detail = await api_get_code_status(code_val)
-        in_use = detail.get('in_use') or detail.get('inUse', False)
-        bound_room = detail.get('bound_room') or detail.get('boundRoom') or detail.get('roomName', '')
-        expires_at = detail.get('expires_at') or detail.get('expiresAt', '')
-        expires_minutes = detail.get('expires_minutes') or detail.get('expiresMinutes', 0)
+        detail = all_status.get(code_val, {})
+        in_use = int(detail.get('in_use') or 0) == 1
+        bound_room = detail.get('bound_room') or ''
+        expires_at = detail.get('expires_at') or ''
+        expires_minutes = detail.get('expires_minutes') or 0
 
         if in_use:
             status = '🔴 使用中'
             if bound_room:
                 status += f'（{bound_room}）'
             time_info = ''
-            if expires_at and str(expires_at) not in ('9999-12-31T00:00:00', 'None', ''):
+            if expires_at:
                 try:
                     exp = datetime.fromisoformat(str(expires_at).replace('Z', '+00:00'))
                     remaining = exp - datetime.now(exp.tzinfo)
