@@ -439,9 +439,43 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    rows = db.get_user_codes(user.id)
+    role = db.get_user_role(user.id)
     stats = db.stock_stats()
 
+    # ROOT/admin 显示所有已发出的码（包括 getcodes 取出的）
+    if role in ('root', 'admin'):
+        with db._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM auth_code_pool WHERE status='assigned' ORDER BY pool_id DESC"
+            ).fetchall()
+        if not rows:
+            await update.message.reply_text(
+                f'📋 <b>授权码总览</b>\n\n'
+                f'暂无已发出的码。\n'
+                f'📦 可用库存：<b>{stats["available"]}</b>',
+                parse_mode='HTML',
+                reply_markup=main_kb(role),
+            )
+            return
+        msg = f'📋 <b>授权码总览</b>\n━━━━━━━━━━━━━━━\n\n'
+        msg += f'📦 可用库存：<b>{stats["available"]}</b> | 已发出：<b>{stats["assigned"]}</b>\n\n'
+        for i, row in enumerate(rows, 1):
+            code_val = row['code']
+            assigned_at = (row['assigned_at'] or '')[:16].replace('T', ' ')
+            if row['assigned_to'] and row['assigned_to'] != 0:
+                owner = f'用户 {row["assigned_to"]}'
+            else:
+                owner = '管理员发放'
+            note = f'  <i>{row["note"]}</i>' if row['note'] else ''
+            msg += f'{i}. <code>{code_val}</code>  {owner}{note}\n   📅 {assigned_at}\n\n'
+            if i >= 30:
+                msg += f'...共 {len(rows)} 条\n'
+                break
+        await update.message.reply_text(msg, parse_mode='HTML', reply_markup=main_kb(role))
+        return
+
+    # 普通 admin 只看自己的
+    rows = db.get_user_codes(user.id)
     if not rows:
         await update.message.reply_text(
             f'📋 <b>我的授权码</b>\n\n'
@@ -455,12 +489,10 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = '📋 <b>我的授权码</b>\n━━━━━━━━━━━━━━━\n\n'
     msg += f'📦 库存剩余可用：<b>{stats["available"]}</b>\n\n'
-
     for i, row in enumerate(rows, 1):
         code_val = row['code']
         assigned_at = (row['assigned_at'] or '')[:16].replace('T', ' ')
         msg += f'{i}. <code>{code_val}</code>\n   🟢 可用\n   📅 领取时间：{assigned_at}\n\n'
-
     await update.message.reply_text(msg, parse_mode='HTML', reply_markup=main_kb('admin'))
 
 
