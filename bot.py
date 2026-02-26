@@ -643,28 +643,41 @@ async def _cb_query_idle(query, uid: int):
             ).fetchall()
 
     all_status = await api_get_all_codes_status()
+    now = datetime.now().astimezone()
 
-    # 过滤出未使用（不在use）的已出库码
-    idle_rows = []
+    # 分类：未使用的已出库码
+    idle_valid = []   # 可用的（未过期）
+    idle_expired = 0  # 已过期报废的数量
     for row in rows:
         detail = all_status.get(row['code'], {})
         if int(detail.get('in_use') or 0) == 1:
             continue
-        idle_rows.append((row, detail))
+        ea = detail.get('expires_at') or ''
+        if ea:
+            try:
+                exp = datetime.fromisoformat(str(ea).replace('Z', '+00:00'))
+                if exp <= now:
+                    idle_expired += 1
+                    continue
+            except Exception:
+                pass
+        idle_valid.append((row, detail))
 
+    total_idle = len(idle_valid) + idle_expired
     msg = f'🟢 <b>未使用</b>\n━━━━━━━━━━━━━━━\n\n'
+    msg += f'已出库共 <b>{total_idle}</b> 个（含已过期 {idle_expired} 个）\n\n'
 
-    # 已出库部分 —— 只显示码值（root 附持码人）
-    if idle_rows:
-        msg += f'<b>已出库 {len(idle_rows)} 个：</b>\n'
-        for i, (row, detail) in enumerate(idle_rows, 1):
+    # 列出可用的码
+    if idle_valid:
+        msg += f'<b>可用 {len(idle_valid)} 个：</b>\n'
+        for i, (row, detail) in enumerate(idle_valid, 1):
             code_val = row['code']
             if role == 'root':
                 msg += f'{i}. <code>{code_val}</code> → {_get_who(row)}\n'
             else:
                 msg += f'{i}. <code>{code_val}</code>\n'
     else:
-        msg += '<b>已出库 0 个</b>\n'
+        msg += '<b>可用 0 个</b>（均已过期或使用中）\n'
 
     # 未出库 —— 只显示数量
     msg += f'\n📦 未出库库存：<b>{stats["available"]}</b> 个\n'
