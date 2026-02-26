@@ -533,11 +533,11 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             status = '⚠️ 已过期'
                     except Exception:
                         pass
-                line = f'{i}. <code>{code_val}</code> → {who}  {status}'
+                msg += f'{i}. <code>{code_val}</code> → {who}\n'
+                msg += f'   {status}\n'
                 if time_info:
-                    line += f'  {time_info}'
-                line += f'  📅 {at}\n'
-                msg += line
+                    msg += f'   {time_info}\n'
+                msg += f'   📅 {at}\n\n'
                 buttons.append([InlineKeyboardButton(f'🔴 结束会议 {code_val}', callback_data=f'release_{code_val}')])
             else:
                 status = '🟢 可用'
@@ -545,12 +545,12 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if expires_minutes and int(expires_minutes) > 0:
                     total_h = int(int(expires_minutes) // 60)
                     total_m = int(int(expires_minutes) % 60)
-                    time_info = f'🕒 {total_h}时{total_m}分' if total_m > 0 else f'🕒 {total_h}小时'
-                line = f'{i}. <code>{code_val}</code> → {who}  {status}'
+                    time_info = f'总时长 {total_h}时{total_m}分（首次开房间后计时）' if total_m > 0 else f'总时长 {total_h}小时（首次开房间后计时）'
+                msg += f'{i}. <code>{code_val}</code> → {who}\n'
+                msg += f'   {status}\n'
                 if time_info:
-                    line += f'  {time_info}'
-                line += f'  📅 {at}\n'
-                msg += line
+                    msg += f'   {time_info}\n'
+                msg += f'   📅 {at}\n\n'
 
         await update.message.reply_text(msg, parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup(buttons) if buttons else main_kb(role))
@@ -601,6 +601,11 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         status = '⚠️ 已过期'
                 except Exception:
                     pass
+            msg += f'{i}. <code>{code_val}</code>\n'
+            msg += f'   {status}\n'
+            if time_info:
+                msg += f'   {time_info}\n'
+            msg += f'   📅 领取时间：{assigned_at}\n\n'
             buttons.append([InlineKeyboardButton(
                 f'🔴 结束会议 {code_val}',
                 callback_data=f'release_{code_val}'
@@ -611,13 +616,12 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if expires_minutes and int(expires_minutes) > 0:
                 total_h = int(int(expires_minutes) // 60)
                 total_m = int(int(expires_minutes) % 60)
-                time_info = f'🕒 {total_h}时{total_m}分' if total_m > 0 else f'🕒 {total_h}小时'
-
-        line = f'{i}. <code>{code_val}</code>  {status}'
-        if time_info:
-            line += f'  {time_info}'
-        line += f'  📅 {assigned_at}\n'
-        msg += line
+                time_info = f'总时长 {total_h}时{total_m}分（首次开房间后计时）' if total_m > 0 else f'总时长 {total_h}小时（首次开房间后计时）'
+            msg += f'{i}. <code>{code_val}</code>\n'
+            msg += f'   {status}\n'
+            if time_info:
+                msg += f'   {time_info}\n'
+            msg += f'   📅 领取时间：{assigned_at}\n\n'
 
     await update.message.reply_text(msg, parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup(buttons) if buttons else main_kb('admin'))
