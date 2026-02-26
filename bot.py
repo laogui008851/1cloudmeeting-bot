@@ -637,6 +637,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     '⛔ 您尚未被授权，请将您的 ID 发给管理员进行绑定：\n\n'
                     f'<code>{uid}</code>',
                     parse_mode='HTML',
+                )
+
+
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     if uid not in ADMIN_IDS:
