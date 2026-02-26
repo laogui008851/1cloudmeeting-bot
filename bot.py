@@ -745,6 +745,33 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(msg, parse_mode='HTML')
         return
 
+    # /admin getcodes <数量>
+    if sub == 'getcodes':
+        n = int(args[1]) if len(args) > 1 and args[1].isdigit() else 10
+        n = min(n, 45)
+        with db._conn() as conn:
+            rows = conn.execute(
+                "SELECT pool_id, code FROM auth_code_pool WHERE status='available' ORDER BY pool_id LIMIT ?", (n,)
+            ).fetchall()
+            if not rows:
+                await update.message.reply_text('❌ 库存为空')
+                return
+            ids = [r[0] for r in rows]
+            conn.execute(
+                f"UPDATE auth_code_pool SET status='assigned', assigned_to=0, assigned_at=? WHERE pool_id IN ({','.join('?'*len(ids))})",
+                [datetime.now().isoformat()] + ids
+            )
+            conn.commit()
+        stats = db.stock_stats()
+        code_list = '\n'.join(f'<code>{r[1]}</code>' for r in rows)
+        await update.message.reply_text(
+            f'📦 <b>已取出 {len(rows)} 个授权码</b>\n'
+            f'剩余库存：<b>{stats["available"]}</b>\n\n'
+            f'{code_list}',
+            parse_mode='HTML',
+        )
+        return
+
     # /admin delcode <码>
     if sub == 'delcode':
         if len(args) < 2:
