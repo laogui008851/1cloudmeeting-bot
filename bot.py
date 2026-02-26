@@ -297,6 +297,12 @@ _PRESET_CODES = [
     'L498JEAR','Q37HTQVM','8QW6N2QC','VDUE9DLK','CML6BYAP','EKGYA5UQ','DWDLRQZ2',
     'Z64PCTNY','L2BJXVQL','NW4E6R7V',
 ]
+# 已手动发出给团队的码，启动时自动标记为已发出（不会再被领走）
+_ISSUED_CODES = [
+    '7CZTHNUF','2B4ET2Y6','UPDUA7TX','PQEYB8QL','K4PAKGQ7','JTSYMLSH','VCWY8ZYJ',
+    '45Z37KVU','6AR9J9NZ','KXHDSDKR','9W4HS57T','4Y52U7Z3','MC2ZM2LL','B3ZGK3CM',
+    'CAGQEFWE','QFB6ZVSP','M652KJTQ','22V5A45D','Q6LJHRZ9','TRJ2SHJE',
+]
 def seed_codes():
     added = 0
     for code in _PRESET_CODES:
@@ -304,6 +310,14 @@ def seed_codes():
             added += 1
     if added:
         logger.info(f'预置授权码：新增 {added} 个入库')
+    # 标记已发出的码
+    with db._conn() as conn:
+        for code in _ISSUED_CODES:
+            conn.execute(
+                "UPDATE auth_code_pool SET status='assigned', assigned_to=0, assigned_at=COALESCE(assigned_at, datetime('now','localtime')) WHERE code=? AND status='available'",
+                (code,)
+            )
+        conn.commit()
 seed_codes()
 
 
