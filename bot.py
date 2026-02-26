@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import aiohttp
 from pathlib import Path
 from datetime import datetime
 
@@ -42,6 +43,7 @@ BOT_TOKEN    = os.getenv('BOT_TOKEN', '')
 OWNER_ID     = int(os.getenv('OWNER_TELEGRAM_ID', '0'))
 ADMIN_IDS    = {int(x) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip().isdigit()}
 ADMIN_IDS.add(OWNER_ID)
+MEET_API_URL = os.getenv('MEET_API_URL', 'https://meet.f13f2f75.org')
 # 自己独立的数据库
 LOCAL_DB = Path(os.getenv(
     'LOCAL_DB_PATH',
@@ -337,8 +339,35 @@ def seed_codes():
 seed_codes()
 
 
-# ============================================================
-#  键盘
+async def api_get_code_status(code: str) -> dict:
+    """查询单个授权码的实时状态（房间、剩余时间等）"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f'{MEET_API_URL}/api/join',
+                params={'code': code},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+    except Exception as e:
+        logger.debug(f'查询码状态失败: {e}')
+    return {}
+
+
+async def api_release_code(code: str) -> bool:
+    """强制释放授权码（结束会议，码还归用户，可重新开房间）"""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f'{MEET_API_URL}/api/leave',
+                json={'authCode': code, 'force': True},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                return resp.status == 200
+    except Exception as e:
+        logger.error(f'释放码异常: {e}')
+    return False
 # ============================================================
 def main_kb(role=None):
     if role in ('root', 'admin'):
@@ -498,16 +527,61 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = '📋 <b>我的授权码</b>\n━━━━━━━━━━━━━━━\n\n'
     msg += f'📦 库存剩余可用：<b>{stats["available"]}</b>\n\n'
 
+    buttons = []
     for i, row in enumerate(rows, 1):
         code_val = row['code']
         assigned_at = (row['assigned_at'] or '')[:16].replace('T', ' ')
-        msg += f'{i}. <code>{code_val}</code>\n   🟢 可用\n   📅 领取时间：{assigned_at}\n\n'
 
-    # 每个码加释放按鈕
-    buttons = [[InlineKeyboardButton(f'🔓 释放 {row["code"]}', callback_data=f'release:{row["pool_id"]}')]
-               for row in rows]
+        # 查 Vercel 实时状态
+        detail = await api_get_code_status(code_val)
+        in_use = detail.get('in_use') or detail.get('inUse', False)
+        bound_room = detail.get('bound_room') or detail.get('boundRoom') or detail.get('roomName', '')
+        expires_at = detail.get('expires_at') or detail.get('expiresAt', '')
+        expires_minutes = detail.get('expires_minutes') or detail.get('expiresMinutes', 0)
+
+        if in_use:
+            status = '🔴 使用中'
+            if bound_room:
+                status += f'（房间：{bound_room}）'
+            buttons.append([InlineKeyboardButton(
+                f'🔴 结束会议 ({code_val})',
+                callback_data=f'release_{code_val}'
+            )])
+        else:
+            status = '🟢 可用'
+            buttons.append([InlineKeyboardButton(
+                f'🔓 释放房间 ({code_val})',
+                callback_data=f'release_{code_val}'
+            )])
+
+        time_info = ''
+        if expires_at and str(expires_at) not in ('9999-12-31T00:00:00', 'None', ''):
+            try:
+                exp = datetime.fromisoformat(str(expires_at).replace('Z', '+00:00'))
+                remaining = exp - datetime.now(exp.tzinfo)
+                if remaining.total_seconds() > 0:
+                    h = int(remaining.total_seconds() // 3600)
+                    m = int((remaining.total_seconds() % 3600) // 60)
+                    time_info = f'⏱ 剩余 {h}时{m}分'
+                else:
+                    status = '⚠️ 已过期'
+            except Exception:
+                pass
+        elif expires_minutes and int(expires_minutes) > 0:
+            total_h = int(int(expires_minutes) // 60)
+            total_m = int(int(expires_minutes) % 60)
+            if total_m > 0:
+                time_info = f'🕒 总时长 {total_h}时{total_m}分（首次开房间后计时）'
+            else:
+                time_info = f'🕒 总时长 {total_h}小时（首次开房间后计时）'
+
+        msg += f'{i}. <code>{code_val}</code>\n   {status}\n'
+        if time_info:
+            msg += f'   {time_info}\n'
+        msg += f'   📅 领取时间：{assigned_at}\n\n'
+
     await update.message.reply_text(msg, parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(buttons))
+        reply_markup=InlineKeyboardMarkup(buttons) if buttons else main_kb('admin'))
 
 
 # ============================================================
@@ -633,6 +707,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     data = query.data or ''
     uid = query.from_user.id
+
+    if data.startswith('release_'):
+        code = data[8:]
+        ok = await api_release_code(code)
+        if ok:
+            await query.message.reply_text(
+                f'✅ 授权码 <code>{code}</code> 已释放，可重新使用。',
+                parse_mode='HTML', reply_markup=main_kb('admin'),
+            )
+        else:
+            await query.message.reply_text(
+                f'❌ 释放失败，请稍后再试。',
+                reply_markup=main_kb('admin'),
+            )
+        return
 
     if data.startswith('release:'):
         try:
