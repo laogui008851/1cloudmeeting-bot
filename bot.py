@@ -499,6 +499,7 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         msg = f'📋 <b>已发出授权码（共{len(all_rows)}个）</b>\n📦 库存剩余：<b>{stats["available"]}</b>\n━━━━━━━━━━━━━━━\n\n'
+        buttons = []
         for i, row in enumerate(all_rows, 1):
             at = (row['assigned_at'] or '')[:16].replace('T', ' ')
             if row['assigned_to'] == 0 or not row['assigned_to']:
@@ -507,8 +508,48 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 uname = row['username'] or ''
                 fname = row['first_name'] or str(row['assigned_to'])
                 who = f'{fname}{ ("@"+uname) if uname else ""}'
-            msg += f'{i}. <code>{row["code"]}</code>  →  {who}\n   📅 {at}\n'
-        await update.message.reply_text(msg, parse_mode='HTML', reply_markup=main_kb(role))
+
+            code_val = row['code']
+            detail = await api_get_code_status(code_val)
+            in_use = detail.get('in_use') or detail.get('inUse', False)
+            bound_room = detail.get('bound_room') or detail.get('boundRoom') or detail.get('roomName', '')
+            expires_at = detail.get('expires_at') or detail.get('expiresAt', '')
+            expires_minutes = detail.get('expires_minutes') or detail.get('expiresMinutes', 0)
+
+            if in_use:
+                status = '🔴 使用中'
+                if bound_room:
+                    status += f'（{bound_room}）'
+                buttons.append([InlineKeyboardButton(f'🔴 结束会议 ({code_val})', callback_data=f'release_{code_val}')])
+            else:
+                status = '🟢 可用'
+                buttons.append([InlineKeyboardButton(f'🔓 释放房间 ({code_val})', callback_data=f'release_{code_val}')])
+
+            time_info = ''
+            if expires_at and str(expires_at) not in ('9999-12-31T00:00:00', 'None', ''):
+                try:
+                    exp = datetime.fromisoformat(str(expires_at).replace('Z', '+00:00'))
+                    remaining = exp - datetime.now(exp.tzinfo)
+                    if remaining.total_seconds() > 0:
+                        h = int(remaining.total_seconds() // 3600)
+                        m = int((remaining.total_seconds() % 3600) // 60)
+                        time_info = f'⏱ 剩余 {h}时{m}分'
+                    else:
+                        status = '⚠️ 已过期'
+                except Exception:
+                    pass
+            elif expires_minutes and int(expires_minutes) > 0:
+                total_h = int(int(expires_minutes) // 60)
+                total_m = int(int(expires_minutes) % 60)
+                time_info = f'🕒 总时长 {total_h}时{total_m}分（首次开房间后计时）' if total_m > 0 else f'🕒 总时长 {total_h}小时（首次开房间后计时）'
+
+            msg += f'{i}. <code>{code_val}</code>  →  {who}\n   {status}'
+            if time_info:
+                msg += f'\n   {time_info}'
+            msg += f'\n   📅 {at}\n'
+
+        await update.message.reply_text(msg, parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(buttons) if buttons else main_kb(role))
         return
 
     rows = db.get_user_codes(user.id)
