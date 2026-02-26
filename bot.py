@@ -221,6 +221,22 @@ class DB:
             conn.commit()
             return cur.rowcount > 0
 
+    def release_code(self, pool_id: int, operator_id: int) -> bool:
+        """释放码：改回可用状态，admin只能释放自己的，root可释放任何人的"""
+        with self._conn() as conn:
+            if operator_id == OWNER_ID:
+                cur = conn.execute(
+                    "UPDATE auth_code_pool SET status='available', assigned_to=NULL, assigned_at=NULL WHERE pool_id=? AND status='assigned'",
+                    (pool_id,)
+                )
+            else:
+                cur = conn.execute(
+                    "UPDATE auth_code_pool SET status='available', assigned_to=NULL, assigned_at=NULL WHERE pool_id=? AND assigned_to=? AND status='assigned'",
+                    (pool_id, operator_id)
+                )
+            conn.commit()
+            return cur.rowcount > 0
+
     def list_codes(self, limit: int = 30):
         with self._conn() as conn:
             return conn.execute(
@@ -487,7 +503,11 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         assigned_at = (row['assigned_at'] or '')[:16].replace('T', ' ')
         msg += f'{i}. <code>{code_val}</code>\n   🟢 可用\n   📅 领取时间：{assigned_at}\n\n'
 
-    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=main_kb('admin'))
+    # 每个码加释放按鈕
+    buttons = [[InlineKeyboardButton(f'🔓 释放 {row["code"]}', callback_data=f'release:{row["pool_id"]}')]
+               for row in rows]
+    await update.message.reply_text(msg, parse_mode='HTML',
+        reply_markup=InlineKeyboardMarkup(buttons))
 
 
 # ============================================================
@@ -611,6 +631,25 @@ async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+    data = query.data or ''
+    uid = query.from_user.id
+
+    if data.startswith('release:'):
+        try:
+            pool_id = int(data.split(':')[1])
+        except (IndexError, ValueError):
+            await query.edit_message_text('❌ 无效操作')
+            return
+        ok = db.release_code(pool_id, uid)
+        if ok:
+            stats = db.stock_stats()
+            await query.edit_message_text(
+                f'✅ <b>释放成功</b>
+📦 库存可用：<b>{stats["available"]}</b> 个',
+                parse_mode='HTML'
+            )
+        else:
+            await query.edit_message_text('❌ 释放失败（该码不属于您或已释放）')
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
