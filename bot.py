@@ -644,8 +644,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ok:
             stats = db.stock_stats()
             await query.edit_message_text(
-                f'✅ <b>释放成功</b>
-📦 库存可用：<b>{stats["available"]}</b> 个',
+                f'✅ <b>释放成功</b>\n📦 库存可用：<b>{stats["available"]}</b> 个',
                 parse_mode='HTML'
             )
         else:
