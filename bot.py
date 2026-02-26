@@ -520,33 +520,37 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 status = '🔴 使用中'
                 if bound_room:
                     status += f'（{bound_room}）'
-                buttons.append([InlineKeyboardButton(f'🔴 结束会议 ({code_val})', callback_data=f'release_{code_val}')])
+                time_info = ''
+                if expires_at and str(expires_at) not in ('9999-12-31T00:00:00', 'None', ''):
+                    try:
+                        exp = datetime.fromisoformat(str(expires_at).replace('Z', '+00:00'))
+                        remaining = exp - datetime.now(exp.tzinfo)
+                        if remaining.total_seconds() > 0:
+                            h = int(remaining.total_seconds() // 3600)
+                            m = int((remaining.total_seconds() % 3600) // 60)
+                            time_info = f'⏱ 剩余 {h}时{m}分'
+                        else:
+                            status = '⚠️ 已过期'
+                    except Exception:
+                        pass
+                line = f'{i}. <code>{code_val}</code> → {who}  {status}'
+                if time_info:
+                    line += f'  {time_info}'
+                line += f'  📅 {at}\n'
+                msg += line
+                buttons.append([InlineKeyboardButton(f'🔴 结束会议 {code_val}', callback_data=f'release_{code_val}')])
             else:
                 status = '🟢 可用'
-                buttons.append([InlineKeyboardButton(f'🔓 释放房间 ({code_val})', callback_data=f'release_{code_val}')])
-
-            time_info = ''
-            if expires_at and str(expires_at) not in ('9999-12-31T00:00:00', 'None', ''):
-                try:
-                    exp = datetime.fromisoformat(str(expires_at).replace('Z', '+00:00'))
-                    remaining = exp - datetime.now(exp.tzinfo)
-                    if remaining.total_seconds() > 0:
-                        h = int(remaining.total_seconds() // 3600)
-                        m = int((remaining.total_seconds() % 3600) // 60)
-                        time_info = f'⏱ 剩余 {h}时{m}分'
-                    else:
-                        status = '⚠️ 已过期'
-                except Exception:
-                    pass
-            elif expires_minutes and int(expires_minutes) > 0:
-                total_h = int(int(expires_minutes) // 60)
-                total_m = int(int(expires_minutes) % 60)
-                time_info = f'🕒 总时长 {total_h}时{total_m}分（首次开房间后计时）' if total_m > 0 else f'🕒 总时长 {total_h}小时（首次开房间后计时）'
-
-            msg += f'{i}. <code>{code_val}</code>  →  {who}\n   {status}'
-            if time_info:
-                msg += f'\n   {time_info}'
-            msg += f'\n   📅 {at}\n'
+                time_info = ''
+                if expires_minutes and int(expires_minutes) > 0:
+                    total_h = int(int(expires_minutes) // 60)
+                    total_m = int(int(expires_minutes) % 60)
+                    time_info = f'🕒 {total_h}时{total_m}分' if total_m > 0 else f'🕒 {total_h}小时'
+                line = f'{i}. <code>{code_val}</code> → {who}  {status}'
+                if time_info:
+                    line += f'  {time_info}'
+                line += f'  📅 {at}\n'
+                msg += line
 
         await update.message.reply_text(msg, parse_mode='HTML',
             reply_markup=InlineKeyboardMarkup(buttons) if buttons else main_kb(role))
@@ -583,43 +587,37 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if in_use:
             status = '🔴 使用中'
             if bound_room:
-                status += f'（房间：{bound_room}）'
+                status += f'（{bound_room}）'
+            time_info = ''
+            if expires_at and str(expires_at) not in ('9999-12-31T00:00:00', 'None', ''):
+                try:
+                    exp = datetime.fromisoformat(str(expires_at).replace('Z', '+00:00'))
+                    remaining = exp - datetime.now(exp.tzinfo)
+                    if remaining.total_seconds() > 0:
+                        h = int(remaining.total_seconds() // 3600)
+                        m = int((remaining.total_seconds() % 3600) // 60)
+                        time_info = f'⏱ 剩余 {h}时{m}分'
+                    else:
+                        status = '⚠️ 已过期'
+                except Exception:
+                    pass
             buttons.append([InlineKeyboardButton(
-                f'🔴 结束会议 ({code_val})',
+                f'🔴 结束会议 {code_val}',
                 callback_data=f'release_{code_val}'
             )])
         else:
             status = '🟢 可用'
-            buttons.append([InlineKeyboardButton(
-                f'🔓 释放房间 ({code_val})',
-                callback_data=f'release_{code_val}'
-            )])
+            time_info = ''
+            if expires_minutes and int(expires_minutes) > 0:
+                total_h = int(int(expires_minutes) // 60)
+                total_m = int(int(expires_minutes) % 60)
+                time_info = f'🕒 {total_h}时{total_m}分' if total_m > 0 else f'🕒 {total_h}小时'
 
-        time_info = ''
-        if expires_at and str(expires_at) not in ('9999-12-31T00:00:00', 'None', ''):
-            try:
-                exp = datetime.fromisoformat(str(expires_at).replace('Z', '+00:00'))
-                remaining = exp - datetime.now(exp.tzinfo)
-                if remaining.total_seconds() > 0:
-                    h = int(remaining.total_seconds() // 3600)
-                    m = int((remaining.total_seconds() % 3600) // 60)
-                    time_info = f'⏱ 剩余 {h}时{m}分'
-                else:
-                    status = '⚠️ 已过期'
-            except Exception:
-                pass
-        elif expires_minutes and int(expires_minutes) > 0:
-            total_h = int(int(expires_minutes) // 60)
-            total_m = int(int(expires_minutes) % 60)
-            if total_m > 0:
-                time_info = f'🕒 总时长 {total_h}时{total_m}分（首次开房间后计时）'
-            else:
-                time_info = f'🕒 总时长 {total_h}小时（首次开房间后计时）'
-
-        msg += f'{i}. <code>{code_val}</code>\n   {status}\n'
+        line = f'{i}. <code>{code_val}</code>  {status}'
         if time_info:
-            msg += f'   {time_info}\n'
-        msg += f'   📅 领取时间：{assigned_at}\n\n'
+            line += f'  {time_info}'
+        line += f'  📅 {assigned_at}\n'
+        msg += line
 
     await update.message.reply_text(msg, parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup(buttons) if buttons else main_kb('admin'))
