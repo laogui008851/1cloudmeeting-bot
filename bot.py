@@ -1038,6 +1038,38 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('❓ 未知命令，发送 /admin 查看帮助')
 
 
+async def auto_release_expired(context):
+    """定时任务：自动释放 Vercel 侧已过期但仍标记为 in_use 的授权码"""
+    try:
+        all_status = await api_get_all_codes_status()
+        now = datetime.now().astimezone()
+        released, failed = [], []
+        for code, detail in all_status.items():
+            if int(detail.get('in_use') or 0) != 1:
+                continue
+            expires_at = detail.get('expires_at') or ''
+            if not expires_at:
+                continue
+            try:
+                exp = datetime.fromisoformat(str(expires_at).replace('Z', '+00:00'))
+                if exp > now:
+                    continue  # 还没过期
+            except Exception:
+                continue
+            # 已过期，尝试释放
+            ok = await api_release_code(code)
+            if ok:
+                released.append(code)
+            else:
+                failed.append(code)
+        if released:
+            logger.info(f'自动释放过期码 {len(released)} 个：{released}')
+        if failed:
+            logger.warning(f'自动释放失败 {len(failed)} 个：{failed}')
+    except Exception as e:
+        logger.error(f'auto_release_expired 异常: {e}')
+
+
 async def on_error(update, context):
     logger.exception('Unhandled exception', exc_info=context.error)
 
@@ -1063,6 +1095,9 @@ def main():
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     app.add_error_handler(on_error)
+
+    # 每5分钟自动释放 Vercel 侧过期的授权码
+    app.job_queue.run_repeating(auto_release_expired, interval=300, first=60)
 
     logger.info('☁️ 自用型机器人启动中...')
     app.run_polling(allowed_updates=Update.ALL_TYPES)
