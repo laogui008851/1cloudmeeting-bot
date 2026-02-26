@@ -45,7 +45,11 @@ OWNER_ID     = int(os.getenv('OWNER_TELEGRAM_ID', '0'))
 ADMIN_IDS    = {int(x) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip().isdigit()}
 ADMIN_IDS.add(OWNER_ID)
 MEET_API_URL = os.getenv('MEET_API_URL', 'https://meet.f13f2f75.org')
-DATABASE_URL = os.getenv('DATABASE_URL', '')
+DATABASE_URL  = os.getenv('DATABASE_URL', '')
+# 每个机器人一个实例名，对应远程DB中不同的表名，多个机器人共用同一Neon互不干扰
+BOT_INSTANCE  = os.getenv('BOT_INSTANCE', 'bot1').strip().lower().replace('-','_')
+TBL_USERS     = f'users_{BOT_INSTANCE}'
+TBL_CODES     = f'auth_code_pool_{BOT_INSTANCE}'
 # 主机器人数据库（本地注册用，远端部署时跳过）
 MASTER_DB = Path(os.getenv(
     'MASTER_DB_PATH',
@@ -97,8 +101,8 @@ class DB:
     def __init__(self):
         conn = self._conn()
         cur = conn.cursor()
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS users (
+        cur.execute(f'''
+            CREATE TABLE IF NOT EXISTS {TBL_USERS} (
                 telegram_id BIGINT PRIMARY KEY,
                 username    TEXT,
                 first_name  TEXT,
@@ -106,8 +110,8 @@ class DB:
                 role        TEXT DEFAULT NULL
             )
         ''')
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS auth_code_pool (
+        cur.execute(f'''
+            CREATE TABLE IF NOT EXISTS {TBL_CODES} (
                 pool_id     SERIAL PRIMARY KEY,
                 code        TEXT UNIQUE NOT NULL,
                 status      TEXT NOT NULL DEFAULT 'available',
@@ -117,17 +121,17 @@ class DB:
                 added_at    TEXT NOT NULL DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD HH24:MI:SS')
             )
         ''')
-        # 迁移：为旧数据库添加 role 列
-        cur.execute("""
+        # 迁移：为旧表添加 role 列
+        cur.execute(f"""
             SELECT column_name FROM information_schema.columns
-            WHERE table_name='users' AND column_name='role'
+            WHERE table_name='{TBL_USERS}' AND column_name='role'
         """)
         if not cur.fetchone():
-            cur.execute('ALTER TABLE users ADD COLUMN role TEXT DEFAULT NULL')
+            cur.execute(f'ALTER TABLE {TBL_USERS} ADD COLUMN role TEXT DEFAULT NULL')
         # 确保 OWNER 始终是 root
         if OWNER_ID:
             cur.execute(
-                "INSERT INTO users (telegram_id, username, first_name, first_seen, role) "
+                f"INSERT INTO {TBL_USERS} (telegram_id, username, first_name, first_seen, role) "
                 "VALUES (%s, '', 'ROOT', %s, 'root') "
                 "ON CONFLICT(telegram_id) DO UPDATE SET role='root'",
                 (OWNER_ID, datetime.now().isoformat())
@@ -141,7 +145,7 @@ class DB:
         try:
             cur = self._cur(conn)
             cur.execute(
-                'INSERT INTO users (telegram_id, username, first_name, first_seen) '
+                f'INSERT INTO {TBL_USERS} (telegram_id, username, first_name, first_seen) '
                 'VALUES (%s, %s, %s, %s) '
                 'ON CONFLICT(telegram_id) DO UPDATE SET username=%s, first_name=%s',
                 (tid, username, first_name, datetime.now().isoformat(), username, first_name)
@@ -154,7 +158,7 @@ class DB:
         conn = self._conn()
         try:
             cur = self._cur(conn)
-            cur.execute('SELECT * FROM users ORDER BY first_seen DESC')
+            cur.execute(f'SELECT * FROM {TBL_USERS} ORDER BY first_seen DESC')
             return cur.fetchall()
         finally:
             conn.close()
@@ -165,7 +169,7 @@ class DB:
         try:
             cur = self._cur(conn)
             cur.execute(
-                'INSERT INTO auth_code_pool (code, note) VALUES (%s, %s) ON CONFLICT DO NOTHING',
+                f'INSERT INTO {TBL_CODES} (code, note) VALUES (%s, %s) ON CONFLICT DO NOTHING',
                 (code.strip().upper(), note)
             )
             conn.commit()
@@ -181,13 +185,13 @@ class DB:
         try:
             cur = self._cur(conn)
             cur.execute(
-                "SELECT pool_id, code FROM auth_code_pool WHERE status='available' ORDER BY pool_id LIMIT 1"
+                f"SELECT pool_id, code FROM {TBL_CODES} WHERE status='available' ORDER BY pool_id LIMIT 1"
             )
             row = cur.fetchone()
             if not row:
                 return None
             cur.execute(
-                "UPDATE auth_code_pool SET status='assigned', assigned_to=%s, assigned_at=%s WHERE pool_id=%s",
+                f"UPDATE {TBL_CODES} SET status='assigned', assigned_to=%s, assigned_at=%s WHERE pool_id=%s",
                 (telegram_id, datetime.now().isoformat(), row['pool_id'])
             )
             conn.commit()
@@ -200,7 +204,7 @@ class DB:
         try:
             cur = self._cur(conn)
             cur.execute(
-                "SELECT * FROM auth_code_pool WHERE assigned_to=%s ORDER BY assigned_at DESC",
+                f"SELECT * FROM {TBL_CODES} WHERE assigned_to=%s ORDER BY assigned_at DESC",
                 (telegram_id,)
             )
             return cur.fetchall()
@@ -212,7 +216,7 @@ class DB:
         try:
             cur = self._cur(conn)
             cur.execute(
-                "UPDATE auth_code_pool SET status='assigned', assigned_to=%s, assigned_at=%s WHERE code=%s AND status='available'",
+                f"UPDATE {TBL_CODES} SET status='assigned', assigned_to=%s, assigned_at=%s WHERE code=%s AND status='available'",
                 (telegram_id, datetime.now().isoformat(), code.upper())
             )
             conn.commit()
@@ -227,11 +231,11 @@ class DB:
         conn = self._conn()
         try:
             cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM auth_code_pool")
+            cur.execute(f"SELECT COUNT(*) FROM {TBL_CODES}")
             total = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM auth_code_pool WHERE status='available'")
+            cur.execute(f"SELECT COUNT(*) FROM {TBL_CODES} WHERE status='available'")
             available = cur.fetchone()[0]
-            cur.execute("SELECT COUNT(*) FROM auth_code_pool WHERE status='assigned'")
+            cur.execute(f"SELECT COUNT(*) FROM {TBL_CODES} WHERE status='assigned'")
             assigned = cur.fetchone()[0]
             return {'total': total, 'available': available, 'assigned': assigned}
         finally:
@@ -242,7 +246,7 @@ class DB:
         try:
             cur = self._cur(conn)
             cur.execute(
-                "DELETE FROM auth_code_pool WHERE code=%s AND status='available'",
+                f"DELETE FROM {TBL_CODES} WHERE code=%s AND status='available'",
                 (code.upper(),)
             )
             conn.commit()
@@ -256,12 +260,12 @@ class DB:
             cur = self._cur(conn)
             if operator_id == OWNER_ID:
                 cur.execute(
-                    "UPDATE auth_code_pool SET status='available', assigned_to=NULL, assigned_at=NULL WHERE pool_id=%s AND status='assigned'",
+                    f"UPDATE {TBL_CODES} SET status='available', assigned_to=NULL, assigned_at=NULL WHERE pool_id=%s AND status='assigned'",
                     (pool_id,)
                 )
             else:
                 cur.execute(
-                    "UPDATE auth_code_pool SET status='available', assigned_to=NULL, assigned_at=NULL WHERE pool_id=%s AND assigned_to=%s AND status='assigned'",
+                    f"UPDATE {TBL_CODES} SET status='available', assigned_to=NULL, assigned_at=NULL WHERE pool_id=%s AND assigned_to=%s AND status='assigned'",
                     (pool_id, operator_id)
                 )
             conn.commit()
@@ -273,7 +277,7 @@ class DB:
         conn = self._conn()
         try:
             cur = self._cur(conn)
-            cur.execute("SELECT * FROM auth_code_pool ORDER BY pool_id DESC LIMIT %s", (limit,))
+            cur.execute(f"SELECT * FROM {TBL_CODES} ORDER BY pool_id DESC LIMIT %s", (limit,))
             return cur.fetchall()
         finally:
             conn.close()
@@ -285,7 +289,7 @@ class DB:
         conn = self._conn()
         try:
             cur = self._cur(conn)
-            cur.execute("SELECT role FROM users WHERE telegram_id=%s", (tid,))
+            cur.execute(f"SELECT role FROM {TBL_USERS} WHERE telegram_id=%s", (tid,))
             row = cur.fetchone()
             return row['role'] if row else None
         finally:
@@ -298,21 +302,21 @@ class DB:
         conn = self._conn()
         try:
             cur = self._cur(conn)
-            cur.execute("SELECT COUNT(*) as c FROM users WHERE role='admin'")
+            cur.execute(f"SELECT COUNT(*) as c FROM {TBL_USERS} WHERE role='admin'")
             if cur.fetchone()['c'] >= 2:
                 return 'max'
-            cur.execute("SELECT role FROM users WHERE telegram_id=%s", (tid,))
+            cur.execute(f"SELECT role FROM {TBL_USERS} WHERE telegram_id=%s", (tid,))
             existing = cur.fetchone()
             if existing and existing['role'] == 'root':
                 return 'is_root'
             if existing and existing['role'] == 'admin':
                 return 'already'
             cur.execute(
-                "INSERT INTO users (telegram_id, username, first_name, first_seen, role) "
+                f"INSERT INTO {TBL_USERS} (telegram_id, username, first_name, first_seen, role) "
                 "VALUES (%s, %s, %s, %s, 'admin') "
-                "ON CONFLICT(telegram_id) DO UPDATE SET role='admin', "
-                "username=COALESCE(EXCLUDED.username, users.username), "
-                "first_name=COALESCE(EXCLUDED.first_name, users.first_name)",
+                f"ON CONFLICT(telegram_id) DO UPDATE SET role='admin', "
+                f"username=COALESCE(EXCLUDED.username, {TBL_USERS}.username), "
+                f"first_name=COALESCE(EXCLUDED.first_name, {TBL_USERS}.first_name)",
                 (tid, username or '', first_name or '', datetime.now().isoformat())
             )
             conn.commit()
@@ -324,7 +328,7 @@ class DB:
         conn = self._conn()
         try:
             cur = self._cur(conn)
-            cur.execute("UPDATE users SET role=NULL WHERE telegram_id=%s AND role='admin'", (tid,))
+            cur.execute(f"UPDATE {TBL_USERS} SET role=NULL WHERE telegram_id=%s AND role='admin'", (tid,))
             conn.commit()
             return cur.rowcount > 0
         finally:
@@ -334,7 +338,7 @@ class DB:
         conn = self._conn()
         try:
             cur = self._cur(conn)
-            cur.execute("SELECT * FROM users WHERE role='admin' ORDER BY first_seen")
+            cur.execute(f"SELECT * FROM {TBL_USERS} WHERE role='admin' ORDER BY first_seen")
             return cur.fetchall()
         finally:
             conn.close()
@@ -343,7 +347,7 @@ class DB:
         conn = self._conn()
         try:
             cur = conn.cursor()
-            cur.execute("SELECT COUNT(*) FROM users WHERE role='admin'")
+            cur.execute(f"SELECT COUNT(*) FROM {TBL_USERS} WHERE role='admin'")
             return cur.fetchone()[0]
         finally:
             conn.close()
@@ -354,7 +358,7 @@ class DB:
         conn = self._conn()
         try:
             cur = self._cur(conn)
-            cur.execute("SELECT * FROM users WHERE telegram_id=%s", (tid,))
+            cur.execute(f"SELECT * FROM {TBL_USERS} WHERE telegram_id=%s", (tid,))
             return cur.fetchone()
         finally:
             conn.close()
@@ -408,19 +412,19 @@ def seed_codes():
         # 标记已发出的码
         for code in _ISSUED_CODES:
             cur.execute(
-                "UPDATE auth_code_pool SET status='assigned', assigned_to=0, "
+                f"UPDATE {TBL_CODES} SET status='assigned', assigned_to=0, "
                 "assigned_at=COALESCE(assigned_at, %s) WHERE code=%s AND status='available'",
                 (now_str, code)
             )
         # 导入外部码
         for code, uid in _EXTERNAL_CODES.items():
             cur.execute(
-                "INSERT INTO users(telegram_id, username, first_name, first_seen, role) "
+                f"INSERT INTO {TBL_USERS}(telegram_id, username, first_name, first_seen, role) "
                 "VALUES(%s, '', %s, %s, 'admin') ON CONFLICT DO NOTHING",
                 (uid, f'用户{uid}', now_str)
             )
             cur.execute(
-                "INSERT INTO auth_code_pool(code, status, assigned_to, assigned_at) "
+                f"INSERT INTO {TBL_CODES}(code, status, assigned_to, assigned_at) "
                 "VALUES(%s, 'assigned', %s, %s) ON CONFLICT DO NOTHING",
                 (code, uid, now_str)
             )
@@ -581,8 +585,8 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # 全部从 Vercel 实时拉取，数字统一来源
-    total, v_avail, v_assign, in_use_count, expired_count = await _overview_stats()
-    msg = _overview_msg(total, v_avail, v_assign, in_use_count, expired_count)
+    total, v_avail, idle_count, in_use_count, expired_count = await _overview_stats()
+    msg = _overview_msg(total, v_avail, idle_count, in_use_count, expired_count)
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton('🔴 使用中', callback_data='query_inuse'),
         InlineKeyboardButton('🟢 未使用', callback_data='query_idle'),
@@ -591,22 +595,32 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _overview_stats() -> tuple:
-    """从 Vercel 实时获取总览统计，返回 (total, available, assigned, in_use, expired)"""
-    import aiohttp as _aiohttp
-    now = datetime.now().astimezone()
-    # stats 接口拿 total/available/assigned
-    async with _aiohttp.ClientSession() as s:
-        async with s.get(f'{MEET_API_URL}/api/admin-code?action=stats',
-                         timeout=_aiohttp.ClientTimeout(total=10)) as r:
-            vstats = await r.json()
-    total    = int(vstats.get('total', 0))
-    v_avail  = int(vstats.get('available', 0))
-    v_assign = int(vstats.get('assigned', 0))
-    # list 接口算使用中/到期
+    """统计本bot管理的码，返回 (total, available, idle, in_use, expired)
+    总数/未出库/出库 来自本地DB，使用中/到期 从Vercel实时查本bot的码"""
+    local = db.stock_stats()
+    total     = local['total']
+    v_avail   = local['available']
+    assigned  = local['assigned']
+
+    # 只查本bot出库的码在Vercel的状态
     all_status = await api_get_all_codes_status()
+    now = datetime.now().astimezone()
     in_use_count = 0
     expired_count = 0
-    for detail in all_status.values():
+
+    # 获取本bot出库的码列表
+    my_codes = set()
+    conn = db._conn()
+    try:
+        cur = db._cur(conn)
+        cur.execute(f"SELECT code FROM {TBL_CODES} WHERE status='assigned'")
+        my_codes = {r['code'] for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+    for code, detail in all_status.items():
+        if code not in my_codes:
+            continue
         ea = detail.get('expires_at') or ''
         if ea:
             try:
@@ -618,14 +632,16 @@ async def _overview_stats() -> tuple:
                 pass
         if int(detail.get('in_use') or 0) == 1:
             in_use_count += 1
-    return total, v_avail, v_assign, in_use_count, expired_count
+
+    idle_count = max(0, assigned - in_use_count - expired_count)
+    return total, v_avail, idle_count, in_use_count, expired_count
 
 
-def _overview_msg(total, v_avail, v_assign, in_use_count, expired_count) -> str:
+def _overview_msg(total, v_avail, idle_count, in_use_count, expired_count) -> str:
     return (
         f'📋 <b>授权码总览</b>\n'
         f'总数（<b>{total}</b>）\n'
-        f'未出库（<b>{v_avail}</b>）/ 出库（<b>{v_assign}</b>）/ 使用中（<b>{in_use_count}</b>）/ 到期（<b>{expired_count}</b>）'
+        f'未出库（<b>{v_avail}</b>）/ 出库未使用（<b>{idle_count}</b>）/ 使用中（<b>{in_use_count}</b>）/ 到期（<b>{expired_count}</b>）'
     )
 
 
@@ -646,14 +662,14 @@ async def _cb_query_inuse(query, uid: int):
         cur = db._cur(conn)
         if role == 'root':
             cur.execute(
-                "SELECT acp.*, u.first_name, u.username FROM auth_code_pool acp "
-                "LEFT JOIN users u ON acp.assigned_to = u.telegram_id "
+                f"SELECT acp.*, u.first_name, u.username FROM {TBL_CODES} acp "
+                f"LEFT JOIN {TBL_USERS} u ON acp.assigned_to = u.telegram_id "
                 "WHERE acp.status='assigned' ORDER BY acp.assigned_at DESC"
             )
         else:
             cur.execute(
-                "SELECT acp.*, u.first_name, u.username FROM auth_code_pool acp "
-                "LEFT JOIN users u ON acp.assigned_to = u.telegram_id "
+                f"SELECT acp.*, u.first_name, u.username FROM {TBL_CODES} acp "
+                f"LEFT JOIN {TBL_USERS} u ON acp.assigned_to = u.telegram_id "
                 "WHERE acp.assigned_to=%s AND acp.status='assigned'",
                 (uid,)
             )
@@ -740,14 +756,14 @@ async def _cb_query_idle(query, uid: int):
         cur = db._cur(conn)
         if role == 'root':
             cur.execute(
-                "SELECT acp.*, u.first_name, u.username FROM auth_code_pool acp "
-                "LEFT JOIN users u ON acp.assigned_to = u.telegram_id "
+                f"SELECT acp.*, u.first_name, u.username FROM {TBL_CODES} acp "
+                f"LEFT JOIN {TBL_USERS} u ON acp.assigned_to = u.telegram_id "
                 "WHERE acp.status='assigned' ORDER BY acp.assigned_at DESC"
             )
         else:
             cur.execute(
-                "SELECT acp.*, u.first_name, u.username FROM auth_code_pool acp "
-                "LEFT JOIN users u ON acp.assigned_to = u.telegram_id "
+                f"SELECT acp.*, u.first_name, u.username FROM {TBL_CODES} acp "
+                f"LEFT JOIN {TBL_USERS} u ON acp.assigned_to = u.telegram_id "
                 "WHERE acp.assigned_to=%s AND acp.status='assigned'",
                 (uid,)
             )
@@ -938,8 +954,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == 'query_back':
-        total, v_avail, v_assign, in_use_count, expired_count = await _overview_stats()
-        msg = _overview_msg(total, v_avail, v_assign, in_use_count, expired_count)
+        total, v_avail, idle_count, in_use_count, expired_count = await _overview_stats()
+        msg = _overview_msg(total, v_avail, idle_count, in_use_count, expired_count)
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton('🔴 使用中', callback_data='query_inuse'),
             InlineKeyboardButton('🟢 未使用', callback_data='query_idle'),
@@ -1069,7 +1085,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             cur = db._cur(conn)
             cur.execute(
-                "SELECT pool_id, code FROM auth_code_pool WHERE status='available' ORDER BY pool_id LIMIT %s", (n,)
+                f"SELECT pool_id, code FROM {TBL_CODES} WHERE status='available' ORDER BY pool_id LIMIT %s", (n,)
             )
             rows = cur.fetchall()
             if not rows:
@@ -1079,7 +1095,7 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ids = [r['pool_id'] for r in rows]
             placeholders = ','.join(['%s'] * len(ids))
             cur.execute(
-                f"UPDATE auth_code_pool SET status='assigned', assigned_to=0, assigned_at=%s WHERE pool_id IN ({placeholders})",
+                f"UPDATE {TBL_CODES} SET status='assigned', assigned_to=0, assigned_at=%s WHERE pool_id IN ({placeholders})",
                 [datetime.now().isoformat()] + ids
             )
             conn.commit()
