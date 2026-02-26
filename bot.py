@@ -321,6 +321,23 @@ _ISSUED_CODES = [
     '45Z37KVU','6AR9J9NZ','KXHDSDKR','9W4HS57T','4Y52U7Z3','MC2ZM2LL','B3ZGK3CM',
     'CAGQEFWE','QFB6ZVSP','M652KJTQ','22V5A45D','Q6LJHRZ9','TRJ2SHJE',
 ]
+# 在Vercel中使用中的码（不走机器人分配渠道，直接导入显示）code->telegram_id
+_EXTERNAL_CODES = {
+    '9NFNDQ46': 8502612839,
+    'FTXBY8RX': 8502612839,
+    'JCSBD374': 8502612839,
+    '5344Y8C4': 7367288310,
+    'C985B4N4': 5719382437,
+    'ZMPEEKQF': 5719382437,
+    'EUSUQNAA': 5719382437,
+    'ZJEGGCUV': 5719382437,
+    'AAYMYQL3': 5719382437,
+    '3H3NAN99': 5719382437,
+    '5H6QLY8X': 5719382437,
+    'PAPQEJR4': 5719382437,
+    'RZQBVJAB': 5719382437,
+    'BQPRBFLY': 8405078911,
+}
 def seed_codes():
     added = 0
     for code in _PRESET_CODES:
@@ -328,12 +345,22 @@ def seed_codes():
             added += 1
     if added:
         logger.info(f'预置授权码：新增 {added} 个入库')
-    # 标记已发出的码
     with db._conn() as conn:
+        # 标记已发出的码
         for code in _ISSUED_CODES:
             conn.execute(
                 "UPDATE auth_code_pool SET status='assigned', assigned_to=0, assigned_at=COALESCE(assigned_at, datetime('now','localtime')) WHERE code=? AND status='available'",
                 (code,)
+            )
+        # 导入外部码（如不存在则插入，并关联到正确用户）
+        for code, uid in _EXTERNAL_CODES.items():
+            conn.execute(
+                "INSERT OR IGNORE INTO users(telegram_id, username, first_name, first_seen, role) VALUES(?,?,?,datetime('now','localtime'),?)",
+                (uid, '', f'用户{uid}', 'admin')
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO auth_code_pool(code, status, assigned_to, assigned_at) VALUES(?,?,?,datetime('now','localtime'))",
+                (code, 'assigned', uid)
             )
         conn.commit()
 seed_codes()
