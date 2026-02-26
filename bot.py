@@ -515,11 +515,30 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 拉取实时状态算统计
-    stats = db.stock_stats()
-    all_status = await api_get_all_codes_status()
-    now = datetime.now().astimezone()
+    # 全部从 Vercel 实时拉取，数字统一来源
+    total, v_avail, v_assign, in_use_count, expired_count = await _overview_stats()
+    msg = _overview_msg(total, v_avail, v_assign, in_use_count, expired_count)
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton('🔴 使用中', callback_data='query_inuse'),
+        InlineKeyboardButton('🟢 未使用', callback_data='query_idle'),
+    ]])
+    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=kb)
 
+
+async def _overview_stats() -> tuple:
+    """从 Vercel 实时获取总览统计，返回 (total, available, assigned, in_use, expired)"""
+    import aiohttp as _aiohttp
+    now = datetime.now().astimezone()
+    # stats 接口拿 total/available/assigned
+    async with _aiohttp.ClientSession() as s:
+        async with s.get(f'{MEET_API_URL}/api/admin-code?action=stats',
+                         timeout=_aiohttp.ClientTimeout(total=10)) as r:
+            vstats = await r.json()
+    total    = int(vstats.get('total', 0))
+    v_avail  = int(vstats.get('available', 0))
+    v_assign = int(vstats.get('assigned', 0))
+    # list 接口算使用中/到期
+    all_status = await api_get_all_codes_status()
     in_use_count = 0
     expired_count = 0
     for detail in all_status.values():
@@ -534,21 +553,15 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
         if int(detail.get('in_use') or 0) == 1:
             in_use_count += 1
+    return total, v_avail, v_assign, in_use_count, expired_count
 
-    issued = stats['assigned']   # 已出库
-    available = stats['available']  # 未出库
 
-    total = available + issued
-    msg = (
+def _overview_msg(total, v_avail, v_assign, in_use_count, expired_count) -> str:
+    return (
         f'📋 <b>授权码总览</b>\n'
         f'总数（<b>{total}</b>）\n'
-        f'未出库（<b>{available}</b>）/ 出库（<b>{issued}</b>）/ 使用中（<b>{in_use_count}</b>）/ 到期（<b>{expired_count}</b>）'
+        f'未出库（<b>{v_avail}</b>）/ 出库（<b>{v_assign}</b>）/ 使用中（<b>{in_use_count}</b>）/ 到期（<b>{expired_count}</b>）'
     )
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton('🔴 使用中', callback_data='query_inuse'),
-        InlineKeyboardButton('🟢 未使用', callback_data='query_idle'),
-    ]])
-    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=kb)
 
 
 def _get_who(row) -> str:
@@ -850,29 +863,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == 'query_back':
-        stats = db.stock_stats()
-        all_status = await api_get_all_codes_status()
-        now = datetime.now().astimezone()
-        in_use_count = 0
-        expired_count = 0
-        for detail in all_status.values():
-            ea = detail.get('expires_at') or ''
-            if ea:
-                try:
-                    exp = datetime.fromisoformat(str(ea).replace('Z', '+00:00'))
-                    if exp <= now:
-                        expired_count += 1
-                        continue
-                except Exception:
-                    pass
-            if int(detail.get('in_use') or 0) == 1:
-                in_use_count += 1
-        total = stats['available'] + stats['assigned']
-        msg = (
-            f'📋 <b>授权码总览</b>\n'
-            f'总数（<b>{total}</b>）\n'
-            f'未出库（<b>{stats["available"]}</b>）/ 出库（<b>{stats["assigned"]}</b>）/ 使用中（<b>{in_use_count}</b>）/ 到期（<b>{expired_count}</b>）'
-        )
+        total, v_avail, v_assign, in_use_count, expired_count = await _overview_stats()
+        msg = _overview_msg(total, v_avail, v_assign, in_use_count, expired_count)
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton('🔴 使用中', callback_data='query_inuse'),
             InlineKeyboardButton('🟢 未使用', callback_data='query_idle'),
