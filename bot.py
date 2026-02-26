@@ -14,7 +14,6 @@ import asyncio
 import logging
 import os
 import sqlite3
-import aiohttp
 from pathlib import Path
 from datetime import datetime
 
@@ -43,7 +42,6 @@ BOT_TOKEN    = os.getenv('BOT_TOKEN', '')
 OWNER_ID     = int(os.getenv('OWNER_TELEGRAM_ID', '0'))
 ADMIN_IDS    = {int(x) for x in os.getenv('ADMIN_IDS', '').split(',') if x.strip().isdigit()}
 ADMIN_IDS.add(OWNER_ID)
-MEET_API_URL  = os.getenv('MEET_API_URL', 'https://meet.f13f2f75.org')
 # 自己独立的数据库
 LOCAL_DB = Path(os.getenv(
     'LOCAL_DB_PATH',
@@ -290,39 +288,7 @@ class DB:
 db = DB()
 
 
-# ============================================================
-#  Vercel API — 只用于查询已发放的码的实时状态 & 释放
-#  不从这里拉取库存！库存只靠管理员 addcode 存入本地DB
-# ============================================================
-async def api_get_code_status(code: str) -> dict:
-    """查询单个授权码的实时状态（使用房间、剩余时间等）"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f'{MEET_API_URL}/api/join',
-                params={'code': code},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-    except Exception as e:
-        logger.debug(f"查询码状态: {e}")
-    return {}
 
-
-async def api_release_code(code: str) -> bool:
-    """强制释放授权码（结束会议）"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f'{MEET_API_URL}/api/leave',
-                json={'authCode': code, 'force': True},
-                timeout=aiohttp.ClientTimeout(total=10),
-            ) as resp:
-                return resp.status == 200
-    except Exception as e:
-        logger.error(f"释放码异常: {e}")
-    return False
 
 
 # ============================================================
@@ -408,25 +374,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome, parse_mode='HTML', reply_markup=main_kb(role))
 
 
-async def _fetch_owner_codes() -> list[dict]:
-    """从 Vercel API 获取 OWNER_ID 名下所有授权码"""
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(
-                f'{MEET_API_URL}/api/create-code',
-                params={'telegramId': str(OWNER_ID)},
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get('codes', [])
-    except Exception as e:
-        logger.warning(f'拉取Vercel码列表失败: {e}')
-    return []
-
-
 async def claim_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """从 Vercel API 领取一个可用授权码"""
+    """从本地库存分配一个授权码"""
     user = update.effective_user
     db.track_user(user.id, user.username, user.first_name)
 
@@ -438,88 +387,35 @@ async def claim_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text('⏳ 正在领取...')
-
-    # 先尝试本地库存
-    code = db.assign_code(user.id)
-    if code:
+    # 检查是否已领取过
+    existing = db.get_user_codes(user.id)
+    if existing:
+        code = existing[0]['code']
         await update.message.reply_text(
-            '✅ <b>领取成功！</b>\n'
+            '⚠️ <b>您已领取过授权码</b>\n'
             '━━━━━━━━━━━━━━━\n\n'
-            f'🔑 授权码：<code>{code}</code>\n\n'
-            '📌 <b>使用方法：</b>\n'
-            '🟢 创建会议：<code>授权码 + 房间号</code>\n'
-            '🔵 加入会议：<code>创建者授权码 + 房间号</code>\n\n'
-            '⏰ 第一次开设房间后开始计时（时长由主机器人设定）\n'
-            '⚠️ 请勿将授权码分享给他人',
+            f'🔑 您的授权码：<code>{code}</code>\n\n'
+            '📌 点击「🔍 查询授权码」查看详情',
             parse_mode='HTML',
             reply_markup=main_kb('admin'),
         )
         return
 
-    # 本地无码，从 Vercel API 拉取 OWNER 名下可用的码
-    all_codes = await _fetch_owner_codes()
-    # 找已分配给当前用户的未使用码
-    user_codes = db.get_user_codes(user.id)
-    already_claimed = {r['code'] for r in user_codes}
-
-    avail_code = None
-    avail_code_info = {}
-    for c in all_codes:
-        code_val = c.get('code', '')
-        in_use = c.get('in_use', False)
-        expires_at = c.get('expires_at') or c.get('expiresAt', '')
-        # 已过期的跳过
-        if expires_at and expires_at != '9999-12-31T00:00:00':
-            try:
-                exp = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
-                if exp < datetime.now(exp.tzinfo):
-                    continue
-            except Exception:
-                pass
-        # 正在使用的跳过
-        if in_use:
-            continue
-        # 已领过的跳过
-        if code_val in already_claimed:
-            continue
-        avail_code = code_val
-        avail_code_info = c
-        break
-
-    if not avail_code:
+    code = db.assign_code(user.id)
+    if not code:
         await update.message.reply_text(
-            '❌ <b>授权码库中暂时无可用授权码</b>\n\n'
+            '❌ <b>暂无可用授权码</b>\n\n'
             '请联系管理员补充库存。',
             parse_mode='HTML',
             reply_markup=main_kb('admin'),
         )
         return
 
-    # 记录到本地DB（方便查询时显示）
-    try:
-        db.add_code(avail_code, note='Vercel同步')
-        db.assign_code_to(user.id, avail_code)
-    except Exception:
-        pass
-
-    # 计算总时长显示
-    em = avail_code_info.get('expires_minutes') or avail_code_info.get('expiresMinutes', 0)
-    if em and int(em) > 0:
-        th = int(int(em) // 60)
-        tm = int(int(em) % 60)
-        if tm > 0:
-            time_str = f'{th}时{tm}分'
-        else:
-            time_str = f'{th}小时'
-    else:
-        time_str = '由主机器人设定'
-
+    stats = db.stock_stats()
     await update.message.reply_text(
         '✅ <b>领取成功！</b>\n'
         '━━━━━━━━━━━━━━━\n\n'
-        f'🔑 授权码：<code>{avail_code}</code>\n'
-        f'🕐 总时长：{time_str}\n\n'
+        f'🔑 授权码：<code>{code}</code>\n\n'
         '📌 <b>使用方法：</b>\n'
         '🟢 创建会议：<code>授权码 + 房间号</code>\n'
         '🔵 加入会议：<code>创建者授权码 + 房间号</code>\n\n'
@@ -531,7 +427,7 @@ async def claim_code(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """查询用户已领取的码 + 实时状态 + 剩余时间（本地+Vercel双源）"""
+    """查询用户已领取的码（纯本地DB）"""
     user = update.effective_user
     db.track_user(user.id, user.username, user.first_name)
 
@@ -543,139 +439,29 @@ async def query_codes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await update.message.reply_text('⏳ 正在查询...')
-
-    # 本地已分配给该用户的码
     rows = db.get_user_codes(user.id)
-    local_codes = [r['code'] for r in rows]
+    stats = db.stock_stats()
 
-    # 也从 Vercel API 拉取 OWNER 名下全部码，找出分配给此用户的
-    all_codes = await _fetch_owner_codes()
-
-    # 合并：本地有的 + Vercel 上有的
-    code_set = set(local_codes)
-    display_codes = list(local_codes)  # 先放本地的
-    for c in all_codes:
-        cv = c.get('code', '')
-        if cv and cv not in code_set:
-            # Vercel 上有但本地没记录的，也显示（可能是管理员通过 API 直接发的）
-            pass  # 不自动加，只显示已领取的
-
-    if not display_codes:
-        # 本地无码，看看 Vercel 上 OWNER 名下可用的总数
-        avail_count = sum(1 for c in all_codes
-                         if not c.get('in_use', False)
-                         and c.get('code'))
-        if avail_count > 0:
-            await update.message.reply_text(
-                f'📋 <b>我的授权码</b>\n\n'
-                f'您还未领取授权码。\n'
-                f'📦 当前库存：<b>{avail_count}</b> 个可用\n\n'
-                f'请点击「🎫 领取授权码」获取。',
-                parse_mode='HTML',
-                reply_markup=main_kb('admin'),
-            )
-        else:
-            await update.message.reply_text(
-                '📋 <b>我的授权码</b>\n\n'
-                '暂无授权码，请联系云际官方或直接前往官方机器人购买。',
-                parse_mode='HTML',
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton('🛒 前往官方购买', url='https://t.me/CloudMeeting_bot')
-                ]])
-            )
+    if not rows:
+        await update.message.reply_text(
+            f'📋 <b>我的授权码</b>\n\n'
+            f'您还未领取授权码。\n'
+            f'📦 当前库存：<b>{stats["available"]}</b> 个可用\n\n'
+            f'请点击「🎫 领取授权码」获取。',
+            parse_mode='HTML',
+            reply_markup=main_kb('admin'),
+        )
         return
 
     msg = '📋 <b>我的授权码</b>\n━━━━━━━━━━━━━━━\n\n'
-
-    # 统计 Vercel 上总库存
-    total_all = len(all_codes)
-    already_claimed = {r['code'] for r in rows}
-    avail_remaining = 0
-    for c in all_codes:
-        cv = c.get('code', '')
-        if cv in already_claimed:
-            continue
-        if c.get('in_use', False):
-            continue
-        expires_at_c = c.get('expires_at') or c.get('expiresAt', '')
-        if expires_at_c and expires_at_c != '9999-12-31T00:00:00':
-            try:
-                exp_c = datetime.fromisoformat(expires_at_c.replace('Z', '+00:00'))
-                if exp_c < datetime.now(exp_c.tzinfo):
-                    continue
-            except Exception:
-                pass
-        avail_remaining += 1
-
-    msg += f'📦 库存总数：<b>{total_all}</b> | 未领取：<b>{avail_remaining}</b>\n\n'
-
-    buttons = []
-
-    # 建立 Vercel 码详细信息的映射表（code -> dict）
-    vercel_map = {}
-    for c in all_codes:
-        cv = c.get('code', '')
-        if cv:
-            vercel_map[cv] = c
+    msg += f'📦 库存剩余可用：<b>{stats["available"]}</b>\n\n'
 
     for i, row in enumerate(rows, 1):
         code_val = row['code']
-        # 优先从 Vercel 数据获取详情
-        vc = vercel_map.get(code_val, {})
-        in_use     = vc.get('in_use', False)
-        bound_room = vc.get('bound_room') or vc.get('boundRoom') or vc.get('roomName', '')
-        expires_at = vc.get('expires_at') or vc.get('expiresAt', '')
-        expires_minutes = vc.get('expires_minutes') or vc.get('expiresMinutes', 0)
+        assigned_at = (row['assigned_at'] or '')[:16].replace('T', ' ')
+        msg += f'{i}. <code>{code_val}</code>\n   🟢 可用\n   📅 领取时间：{assigned_at}\n\n'
 
-        # 如果 Vercel 没数据，走旧的 API 查询
-        if not vc:
-            detail = await api_get_code_status(code_val)
-            in_use = detail.get('in_use') or detail.get('inUse', False)
-            bound_room = detail.get('bound_room') or detail.get('boundRoom') or detail.get('roomName', '')
-            expires_at = detail.get('expires_at') or detail.get('expiresAt', '')
-
-        if in_use:
-            status = '🟡 使用中'
-            if bound_room:
-                status += f'（房间：{bound_room}）'
-            buttons.append([InlineKeyboardButton(
-                f'🔴 结束会议 ({code_val})',
-                callback_data=f'release_{code_val}'
-            )])
-        else:
-            status = '🟢 可用'
-
-        time_info = ''
-        if expires_at and str(expires_at) != '9999-12-31T00:00:00' and expires_at != 'None' and expires_at is not None:
-            # 已开始计时 → 显示剩余时间
-            try:
-                exp = datetime.fromisoformat(str(expires_at).replace('Z', '+00:00'))
-                remaining = exp - datetime.now(exp.tzinfo)
-                if remaining.total_seconds() > 0:
-                    h = int(remaining.total_seconds() // 3600)
-                    m = int((remaining.total_seconds() % 3600) // 60)
-                    time_info = f'⏰ 剩余 {h}时{m}分'
-                else:
-                    status = '⚫ 已过期'
-            except Exception:
-                pass
-        elif expires_minutes and int(expires_minutes) > 0:
-            # 未开始计时 → 显示总时长
-            total_h = int(int(expires_minutes) // 60)
-            total_m = int(int(expires_minutes) % 60)
-            if total_m > 0:
-                time_info = f'🕐 总时长 {total_h}时{total_m}分（首次开房间后计时）'
-            else:
-                time_info = f'🕐 总时长 {total_h}小时（首次开房间后计时）'
-
-        msg += f'{i}. <code>{code_val}</code>\n   {status}'
-        if time_info:
-            msg += f'\n   {time_info}'
-        msg += '\n\n'
-
-    kb = InlineKeyboardMarkup(buttons) if buttons else main_kb()
-    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=kb)
+    await update.message.reply_text(msg, parse_mode='HTML', reply_markup=main_kb('admin'))
 
 
 # ============================================================
@@ -799,18 +585,6 @@ async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    data = query.data or ''
-
-    if data.startswith('release_'):
-        code = data[8:]
-        ok = await api_release_code(code)
-        if ok:
-            await query.message.reply_text(
-                f'✅ 授权码 <code>{code}</code> 已释放，可重新使用。',
-                parse_mode='HTML', reply_markup=main_kb('admin'),
-            )
-        else:
-            await query.message.reply_text('❌ 释放失败，请稍后重试。', reply_markup=main_kb('admin'))
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
